@@ -1,4 +1,4 @@
-package server
+package keyValStore
 
 import(
     "raft"
@@ -10,14 +10,17 @@ import(
 // *WorkerFSM implements raft.FSM by implementing Apply,
 // Snapshot, Restore.
 type WorkerFSM struct {
-
+    // Map representing key-value store.
+    KeyValMap       map[string]string
 }
 
 // Create array of worker FSMs for starting a cluster.
 func CreateWorkers(n int) ([]raft.FSM) {
     workers := make([]*WorkerFSM, n)
     for i := range workers {
-        workers[i] = &WorkerFSM{}
+        workers[i] = &WorkerFSM{
+            KeyValMap:  make(map[string]string),
+        }
     }
     fsms := make([]raft.FSM, n)
     for i, w := range workers {
@@ -33,9 +36,17 @@ func (w *WorkerFSM) Apply(log *raft.Log)(interface{}, []func() [][]byte) {
     err := json.Unmarshal(log.Data, &args)
     if err != nil {
         fmt.Println("Poorly formatted request: ", err)
+        return nil, nil
     }
-    // TODO: implement key-value store here
-    fmt.Println("applying command: ", args)
+    function := args[FunctionArg]
+    switch function {
+        case GetCommand:
+            return GetResponse{Value: w.KeyValMap[args[KeyArg]]}, nil
+        case SetCommand:
+            w.KeyValMap[args[KeyArg]] = args[ValueArg]
+            return nil, nil
+
+    }
     return nil, []func()[][]byte{}
 }
 
