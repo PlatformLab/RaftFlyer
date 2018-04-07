@@ -16,27 +16,26 @@ type Session struct {
     raftServers         []ServerAddress
     stopCh              chan bool
     active              bool
-    endSessionCommand   []byte
+    // Client ID assigned by cluster for use in RIFL. 
+    clientID            int64
+    // Sequence number of next RPC for use in RIFL.
+    rpcSeqNo            int64
 }
 
 
 /* Open client session to cluster. Takes clientID, server addresses for all servers in cluster, and returns success or failure.
    Start go routine to periodically send heartbeat messages and switch to new leader when necessary. */ 
-func CreateClientSession(trans *NetworkTransport, addrs []ServerAddress, endSessionCommand []byte) (*Session, error) {
+func CreateClientSession(trans *NetworkTransport, addrs []ServerAddress) (*Session, error) {
     session := &Session{
         trans: trans,
         raftServers: addrs,
         active: true,
         stopCh : make(chan bool, 1),
-        endSessionCommand: endSessionCommand,
     }
     var err error
     session.currConn, err = findActiveServerWithTrans(addrs, trans)
     if err != nil {
         return nil ,err
-    }
-    if endSessionCommand != nil {
-       go session.sessionKeepAliveLoop()
     }
     return session, nil
 }
@@ -61,7 +60,6 @@ func (s *Session) SendRequest(data []byte, resp *ClientResponse) error {
             },
         },
         ClientAddr: s.trans.LocalAddr(),
-        EndSessionCommand: s.endSessionCommand,
         KeepSession: true,
     }
     return s.sendToActiveLeader(&req, resp)
@@ -76,33 +74,6 @@ func (s *Session) CloseClientSession() error {
     s.stopCh <- true
     fmt.Println("closed client session")
     return nil
-}
-
-/* Loop to send and receive heartbeat messages. */
-func (s *Session) sessionKeepAliveLoop() {
-    for s.active {
-        select {
-        case <-time.After(10*time.Second):
-        case <- s.stopCh:
-            s.active = false
-        }
-        if !s.active {
-            fmt.Println("client session no longer active")
-            return
-        }
-        // Send RPC
-        heartbeat := ClientRequest{
-          RPCHeader: RPCHeader{
-              ProtocolVersion: ProtocolVersionMax,
-          },
-          Entries: nil,
-          ClientAddr: s.trans.LocalAddr(),
-          KeepSession: true,
-          EndSessionCommand: s.endSessionCommand,
-        }
-        s.sendToActiveLeader(&heartbeat, &ClientResponse{})
-    }
-    fmt.Println("client session no longer active")
 }
 
 func (s *Session) sendToActiveLeader(request *ClientRequest, response *ClientResponse) error {
@@ -160,41 +131,4 @@ func findActiveServerWithTrans(addrs []ServerAddress, trans *NetworkTransport) (
         }
     }
     return nil, errors.New("No active raft servers.")
-}
-
-func findActiveServerWithoutTrans(addrs []ServerAddress) (*netConn, error) {
-    for _, addr := range(addrs) {
-        conn, err := buildNetConn(addr)
-        if err == nil {
-            return conn, nil
-        }
-        if conn != nil {
-            conn.conn.Close()
-        }
-    }
-    return nil, errors.New("No active raft servers.")
-}
-
-func buildNetConn(target ServerAddress) (*netConn, error) {
-    // Dial a new connection
-    conn, err := net.Dial("tcp", string(target))
-	if err != nil {
-        fmt.Println("error dialing: ", err)
-        return nil, err
-	}
-
-	// Wrap the conn
-	netConn := &netConn{
-		target: target,
-		conn:   conn,
-		r:      bufio.NewReader(conn),
-		w:      bufio.NewWriter(conn),
-	}
-
-	// Setup encoder/decoders
-	netConn.dec = codec.NewDecoder(netConn.r, &codec.MsgpackHandle{})
-	netConn.enc = codec.NewEncoder(netConn.w, &codec.MsgpackHandle{})
-
-	// Done
-	return netConn, nil
 }
