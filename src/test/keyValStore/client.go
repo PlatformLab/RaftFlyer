@@ -81,7 +81,7 @@ func (c *Client) getSession() (*raft.Session, error) {
     if existing != nil {
         return existing, nil
     }
-    newSession, err := raft.CreateClientSession(c.trans, c.servers, nil)
+    newSession, err := raft.CreateClientSession(c.trans, c.servers)
     c.session = newSession
     return c.session, err
 }

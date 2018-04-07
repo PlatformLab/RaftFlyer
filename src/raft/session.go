@@ -1,13 +1,9 @@
 package raft
 
 import (
-    "net"
     "time"
     "fmt"
     "errors"
-    "bufio"
-
-    "github.com/hashicorp/go-msgpack/codec"
 )
 
 type Session struct {
