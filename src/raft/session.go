@@ -19,26 +19,6 @@ type Session struct {
     endSessionCommand   []byte
 }
 
-// Send request to cluster without using session.
-func SendSingletonRequestToCluster(addrs []ServerAddress, data []byte, resp *ClientResponse) error {
-    if resp == nil {
-        return errors.New("Response is nil")
-    }
-    // Send RPC
-    clientRequest := ClientRequest{
-        RPCHeader: RPCHeader{
-            ProtocolVersion: ProtocolVersionMax,
-        },
-        Entries: []*Log{
-            &Log{
-                Type: LogCommand,
-                Data: data,
-            },
-        },
-    }
-    return sendSingletonRpcToActiveLeader(addrs, &clientRequest, resp)
-}
-
 
 /* Open client session to cluster. Takes clientID, server addresses for all servers in cluster, and returns success or failure.
    Start go routine to periodically send heartbeat messages and switch to new leader when necessary. */ 
@@ -171,57 +151,6 @@ func (s *Session) sendToActiveLeader(request *ClientRequest, response *ClientRes
     return nil
 }
 
-func sendSingletonRpcToActiveLeader(addrs []ServerAddress, request *ClientRequest, response *ClientResponse) error {
-    retries := 5 
-    conn, err := findActiveServerWithoutTrans(addrs)
-    if err != nil {
-        return errors.New("No active server found.")
-    }
-    err = errors.New("")
-    /* Send heartbeat to active leader. Connect to active leader if connection no longer to active leader. */
-    for err != nil {
-        if conn == nil {
-            return errors.New("No current connection.")
-        }
-        if retries <= 0 {
-            conn.conn.Close()
-            return errors.New("Failed to find active leader.")
-        }
-        err = sendRPC(conn, rpcClientRequest, request)
-        /* Try another server if server went down. */
-        for err != nil {
-            fmt.Println("error sending: ", err)
-            if retries <= 0 {
-                if conn != nil {
-                    conn.conn.Close()
-                }
-                return errors.New("Failed to find active leader.")
-            }
-            conn, err = findActiveServerWithoutTrans(addrs)
-            if err != nil || conn == nil {
-                if conn != nil {
-                    conn.conn.Close()
-                }
-                return errors.New("No active server found.")
-            }
-            retries--
-            err = sendRPC(conn, rpcClientRequest, request)
-        }
-        /* Decode response if necesary. Try new server to find leader if necessary. */
-        _, err = decodeResponse(conn, &response)
-        if err != nil {
-            if response.LeaderAddress != "" {
-                conn, _ = buildNetConn(response.LeaderAddress)
-             } else {
-                 /* Wait for leader to be elcted. */
-                 time.Sleep(1000*time.Millisecond)
-            }
-        }
-        retries--
-    }
-    conn.conn.Close()
-    return nil
-}
 
 func findActiveServerWithTrans(addrs []ServerAddress, trans *NetworkTransport) (*netConn, error) {
     for _, addr := range(addrs) {
