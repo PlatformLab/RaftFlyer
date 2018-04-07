@@ -9,7 +9,6 @@ import (
 	"time"
     "encoding/json"
 	"github.com/armon/go-metrics"
-    "sync"
 )
 
 const (
@@ -76,12 +75,6 @@ type commitTuple struct {
 	future *logFuture
 }
 
-type clientSession struct {
-    lastContact         time.Time
-    heartbeatCh         chan bool
-    endSessionCommand   []byte
-}
-
 // leaderState is state that is used while we are a leader.
 type leaderState struct {
 	commitCh   chan struct{}
@@ -90,8 +83,6 @@ type leaderState struct {
 	replState  map[ServerID]*followerReplication
 	notify     map[*verifyFuture]struct{}
 	stepDown   chan struct{}
-    clientSessions  map[ServerAddress]*clientSession
-    clientSessionsLock  sync.RWMutex
 }
 
 // setLeader is used to modify the current leader of the cluster
@@ -346,7 +337,6 @@ func (r *Raft) runLeader() {
 	r.leaderState.replState = make(map[ServerID]*followerReplication)
 	r.leaderState.notify = make(map[*verifyFuture]struct{})
 	r.leaderState.stepDown = make(chan struct{}, 1)
-    r.leaderState.clientSessions = make(map[ServerAddress]*clientSession)
 
 	// Cleanup state on step down
 	defer func() {
@@ -1373,27 +1363,6 @@ func (r *Raft) clientRequest(rpc RPC, c *ClientRequest) {
     // Have we contacted the leader?
     var rpcErr error
     if (r.getState() == Leader) {
-        // Maintain sessions
-        if (c.KeepSession) {
-            r.leaderState.clientSessionsLock.RLock()
-            _, ok := r.leaderState.clientSessions[c.ClientAddr]
-            r.leaderState.clientSessionsLock.RUnlock()
-            // If first session, start heartbeat loop.
-            if c.EndSessionCommand != nil {
-                if !ok {
-                    r.leaderState.clientSessionsLock.Lock()
-                    r.leaderState.clientSessions[c.ClientAddr] = &clientSession{}
-                    r.leaderState.clientSessions[c.ClientAddr].heartbeatCh = make (chan bool, 1)
-                    r.leaderState.clientSessions[c.ClientAddr].endSessionCommand = c.EndSessionCommand
-                    r.leaderState.clientSessionsLock.Unlock()
-                    go r.clientSessionHeartbeatLoop(c.ClientAddr)
-                }
-                r.leaderState.clientSessionsLock.RLock()
-                ch := r.leaderState.clientSessions[c.ClientAddr].heartbeatCh
-                r.leaderState.clientSessionsLock.RUnlock()
-                ch <- true
-            }
-        }
         // Apply all commands in client request.
         go func(r *Raft, resp *ClientResponse, rpc RPC, c *ClientRequest) {
             var rpcErr error
@@ -1433,34 +1402,6 @@ func (r *Raft) applyCommand(command []byte, resp *ClientResponse, rpcErr *error)
     resp.Success = true
     for _,nextCommand := range nextCommands {
         r.applyCommand(nextCommand, resp, rpcErr)
-    }
-}
-
-/* Manage a client session. */
-func (r *Raft) clientSessionHeartbeatLoop(clientAddr ServerAddress) {
-    r.leaderState.clientSessionsLock.RLock()
-    ch := r.leaderState.clientSessions[clientAddr].heartbeatCh
-    r.leaderState.clientSessionsLock.RUnlock()
-    for {
-        select {
-        case <- ch:
-            r.leaderState.clientSessionsLock.Lock()
-            r.leaderState.clientSessions[clientAddr].lastContact = time.Now()
-            r.leaderState.clientSessionsLock.Unlock()
-        case <- time.After(30*time.Second):
-            r.logger.Printf("ending client session")
-            var err error
-            r.leaderState.clientSessionsLock.RLock()
-            command := r.leaderState.clientSessions[clientAddr].endSessionCommand
-            r.leaderState.clientSessionsLock.RUnlock()
-            if command != nil {
-                r.applyCommand(command, &ClientResponse{}, &err)
-            }
-            r.leaderState.clientSessionsLock.Lock()
-            delete(r.leaderState.clientSessions, clientAddr)
-            r.leaderState.clientSessionsLock.Unlock()
-            return
-        }
     }
 }
 

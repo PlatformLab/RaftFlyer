@@ -155,12 +155,10 @@ type ClientRequest struct {
 
     // New entries to commit. 
     Entries[] *Log
-    // True if should initiate or maintain session, false otherwise.
-    KeepSession bool
-    // ID of client to contact raft server. 
-    ClientAddr ServerAddress
-    // Command to be executed when client session terminates.
-    EndSessionCommand []byte
+    // ID of client, for use in RIFL.
+    ClientID    int64
+    // Sequence number of RPC, for use in RIFL.
+    SeqNo       int64
 }
 
 // See WithRPCHeader.

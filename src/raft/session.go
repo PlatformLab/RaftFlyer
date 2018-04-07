@@ -27,7 +27,9 @@ func CreateClientSession(trans *NetworkTransport, addrs []ServerAddress) (*Sessi
         raftServers: addrs,
         active: true,
         stopCh : make(chan bool, 1),
+        rpcSeqNo: 0,
     }
+    session.clientID = 0    // TODO: get this value from the server
     var err error
     session.currConn, err = findActiveServerWithTrans(addrs, trans)
     if err != nil {
@@ -55,9 +57,10 @@ func (s *Session) SendRequest(data []byte, resp *ClientResponse) error {
                 Data: data,
             },
         },
-        ClientAddr: s.trans.LocalAddr(),
-        KeepSession: true,
+        ClientID: s.clientID,
+        SeqNo: s.rpcSeqNo,
     }
+    s.rpcSeqNo++
     return s.sendToActiveLeader(&req, resp)
 }
 
