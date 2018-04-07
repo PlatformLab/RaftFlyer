@@ -6,19 +6,30 @@ import (
 )
 
 type Client struct {
-    raftClient      *raft.Client
+    // Client transport layer.
+    trans       *raft.NetworkTransport
+    // Addresses in cluster.
+    servers     []raft.ServerAddress
+    // Open session with cluster leader.
+    session     *raft.Session
 }
 
 // Create new client for sending RPCs.
 func CreateClient(trans *raft.NetworkTransport, servers []raft.ServerAddress) (*Client) {
     return &Client {
-        raftClient:     raft.CreateClient(trans, servers),
+        trans:      trans,
+        servers:    servers,
+        session:    nil,
     }
 }
 
 // Cleanup associated with client.
 func (c *Client) DestroyClient() error {
-    return c.raftClient.DestroyClient()
+    if c.session != nil {
+        return c.session.CloseClientSession()
+    } else {
+        return nil
+    }
 }
 
 // Send RPC to set the value of a key. No expected response.
@@ -31,8 +42,11 @@ func (c *Client) Set(key string, value string) error {
     if marshal_err != nil  {
         return marshal_err
     }
-    _, err := c.raftClient.SendRpc(data)
-    return err
+    session, session_err := c.getSession()
+    if session_err != nil {
+        return session_err
+    }
+    return session.SendRequest(data, &raft.ClientResponse{})
 }
 
 // Send RPC to get the value of a key. Empty string if error. 
@@ -44,7 +58,12 @@ func (c *Client) Get(key string) (string, error) {
     if marshal_err != nil {
         return "", marshal_err
     }
-    resp, sendErr := c.raftClient.SendRpc(data)
+    resp := raft.ClientResponse{}
+    session, sessionErr := c.getSession()
+    if sessionErr != nil {
+        return "", sessionErr
+    }
+    sendErr := session.SendRequest(data, &resp)
     if sendErr != nil {
         return "", sendErr
     }
@@ -56,3 +75,13 @@ func (c *Client) Get(key string) (string, error) {
     return response.Value, nil
 }
 
+// Private method for opening new session if one doesn't exist.
+func (c *Client) getSession() (*raft.Session, error) {
+    existing := c.session
+    if existing != nil {
+        return existing, nil
+    }
+    newSession, err := raft.CreateClientSession(c.trans, c.servers, nil)
+    c.session = newSession
+    return c.session, err
+}
