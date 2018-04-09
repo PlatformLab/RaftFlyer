@@ -178,3 +178,25 @@ type ClientResponse struct {
 func (r *ClientResponse) GetRPCHeader() RPCHeader {
 	return r.RPCHeader
 }
+
+type ClientIdRequest struct {
+    RPCHeader
+}
+
+// See WithRPCHeader.
+func (r *ClientIdRequest) GetRPCHeader() RPCHeader {
+	return r.RPCHeader
+}
+
+type ClientIdResponse struct {
+    RPCHeader
+
+    // ID of client assigned by cluster.
+    ClientID    int64
+}
+
+// See WithRPCHeader.
+func (r *ClientIdResponse) GetRPCHeader() RPCHeader {
+	return r.RPCHeader
+}
+
