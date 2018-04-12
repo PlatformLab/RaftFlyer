@@ -924,6 +924,13 @@ func (r *Raft) processLog(l *Log, future *logFuture) {
 		// by the FSM handler when the application is done
 		return
 
+    case LogNextClientId:
+        var nextClientId uint64
+        if err := decodeMsgPack(l.Data, &nextClientId); err != nil {
+            panic(fmt.Errorf("failed to decode next cliend id: %v", err))
+        }
+        r.nextClientId = nextClientId
+
 	case LogConfiguration:
 	case LogAddPeerDeprecated:
 	case LogRemovePeerDeprecated:
@@ -957,6 +964,8 @@ func (r *Raft) processRPC(rpc RPC) {
 		r.installSnapshot(rpc, cmd)
     case *ClientRequest:
         r.clientRequest(rpc, cmd)
+    case *ClientIdRequest:
+        r.clientIdRequest(rpc, cmd)
     default:
 		r.logger.Printf("[ERR] raft: Got unexpected command: %#v", rpc.Command)
 		rpc.Respond(nil, fmt.Errorf("unexpected command"))
@@ -1351,6 +1360,30 @@ func (r *Raft) installSnapshot(rpc RPC, req *InstallSnapshotRequest) {
 	resp.Success = true
 	r.setLastContact()
 	return
+}
+
+// Handle a clientIdRequest from client. Can only be handled at
+// the leader. Assigns a new client ID and replicates the client
+// ID to followers.
+func (r *Raft) clientIdRequest(rpc RPC, c *ClientIdRequest) {
+    leader := r.Leader()
+    resp := &ClientIdResponse{
+        LeaderAddress : leader,
+    }
+    // Can only assign client IDs at the leader.
+    if (r.getState() == Leader) {
+        resp.ClientID = r.nextClientId
+        r.nextClientId += 1
+        go func(r *Raft, resp *ClientIdResponse, rpc RPC) {
+            f := r.SendNextClientId(0)
+            if f.Error() != nil {
+                r.logger.Printf("err :%v", f.Error())
+            }
+            rpc.Respond(resp, f.Error())
+        }(r, resp, rpc)
+    } else {
+        rpc.Respond(resp, ErrNotLeader)
+    }
 }
 
 // Handle a clientRequest RPC from client.

@@ -115,7 +115,10 @@ type Raft struct {
 	// the log/snapshot.
 	configurations configurations
 
-	// RPC chan comes from the transport layer
+    // Next Client ID to assign to new client. Used for RIFL.
+	nextClientId uint64;
+
+    // RPC chan comes from the transport layer
 	rpcCh <-chan RPC
 
 	// Shutdown channel to exit, protected to prevent concurrent exits
@@ -623,6 +626,37 @@ func (r *Raft) Apply(cmd []byte, timeout time.Duration) ApplyFuture {
 	case r.applyCh <- logFuture:
 		return logFuture
 	}
+}
+
+// Updates all Raft nodes with the value of NextClientId at the leader.
+// This must be run at the leader.
+func (r *Raft) SendNextClientId(timeout time.Duration) Future {
+    var timer <-chan time.Time
+    if timeout > 0 {
+        timer = time.After(timeout)
+    }
+
+    buf, err := encodeMsgPack(r.nextClientId)
+    if err != nil {
+        panic(fmt.Errorf("failed to encode next client id: %v", err))
+    }
+
+    logFuture := &logFuture {
+        log: Log {
+            Type: LogNextClientId,
+            Data: buf.Bytes(),
+        },
+    }
+    logFuture.init()
+
+    select {
+        case <-timer:
+            return errorFuture{ErrEnqueueTimeout}
+        case <-r.shutdownCh:
+            return errorFuture{ErrRaftShutdown}
+        case r.applyCh <-logFuture:
+            return logFuture
+    }
 }
 
 // Barrier is used to issue a command that blocks until all preceeding

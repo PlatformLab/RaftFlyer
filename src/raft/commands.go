@@ -192,7 +192,10 @@ type ClientIdResponse struct {
     RPCHeader
 
     // ID of client assigned by cluster.
-    ClientID    int64
+    ClientID    uint64
+
+    // Address of active leader. Used as a hint to find active leader.
+    LeaderAddress ServerAddress
 }
 
 // See WithRPCHeader.
