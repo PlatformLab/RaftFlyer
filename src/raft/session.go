@@ -34,13 +34,18 @@ func CreateClientSession(trans *NetworkTransport, addrs []ServerAddress) (*Sessi
     if err != nil {
         return nil ,err
     }
-    req := ClientIdRequest{}
+    req := ClientIdRequest{
+        RPCHeader: RPCHeader {
+            ProtocolVersion: ProtocolVersionMax,
+        },
+    }
     resp := ClientIdResponse{}
-    err = session.sendToActiveLeader(&req, &resp)
+    err = session.sendToActiveLeader(&req, &resp, rpcClientIdRequest)
     if err != nil {
         return nil, err
     }
     session.clientID = resp.ClientID
+    fmt.Println("New client id is ", session.clientID)
     return session, nil
 }
 
@@ -67,7 +72,7 @@ func (s *Session) SendRequest(data []byte, resp *ClientResponse) error {
         SeqNo: s.rpcSeqNo,
     }
     s.rpcSeqNo++
-    return s.sendToActiveLeader(&req, resp)
+    return s.sendToActiveLeader(&req, resp, rpcClientRequest)
 }
 
 
@@ -81,7 +86,7 @@ func (s *Session) CloseClientSession() error {
     return nil
 }
 
-func (s *Session) sendToActiveLeader(request interface{}, response GenericClientResponse) error {
+func (s *Session) sendToActiveLeader(request interface{}, response GenericClientResponse, rpcType uint8) error {
     var err error = errors.New("")
     retries := 5
     /* Send heartbeat to active leader. Connect to active leader if connection no longer to active leader. */
@@ -94,7 +99,7 @@ func (s *Session) sendToActiveLeader(request interface{}, response GenericClient
             s.active = false
             return errors.New("No current connection.")
         }
-        err = sendRPC(s.currConn, rpcClientRequest, request)
+        err = sendRPC(s.currConn, rpcType, request)
         /* Try another server if server went down. */
         for err != nil {
             if retries <= 0 {
@@ -107,7 +112,7 @@ func (s *Session) sendToActiveLeader(request interface{}, response GenericClient
                 return errors.New("No active server found.")
             }
             retries--
-            err = sendRPC(s.currConn, rpcClientRequest, request)
+            err = sendRPC(s.currConn, rpcType, request)
         }
         /* Decode response if necesary. Try new server to find leader if necessary. */
         if (s.currConn == nil) {

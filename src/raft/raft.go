@@ -1374,6 +1374,7 @@ func (r *Raft) clientIdRequest(rpc RPC, c *ClientIdRequest) {
     if (r.getState() == Leader) {
         resp.ClientID = r.nextClientId
         r.nextClientId += 1
+        r.logger.Printf("Client ID to send is %v", r.nextClientId)
         go func(r *Raft, resp *ClientIdResponse, rpc RPC) {
             f := r.SendNextClientId(0)
             if f.Error() != nil {
