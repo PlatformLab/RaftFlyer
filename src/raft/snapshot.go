@@ -22,6 +22,9 @@ type SnapshotMeta struct {
 	Index uint64
 	Term  uint64
 
+    // Next Client ID to use. Used with RIFL.
+    NextClientId uint64
+
 	// Peers is deprecated and used to support version 0 snapshots, but will
 	// be populated in version 1 snapshots as well to help with upgrades.
 	Peers []byte
@@ -44,7 +47,7 @@ type SnapshotStore interface {
 	// the given committed configuration. The version parameter controls
 	// which snapshot version to create.
 	Create(version SnapshotVersion, index, term uint64, configuration Configuration,
-		configurationIndex uint64, trans Transport) (SnapshotSink, error)
+		configurationIndex uint64, nextClintId uint64, trans Transport) (SnapshotSink, error)
 
 	// List is used to list the available snapshots in the store.
 	// It should return then in descending order, with the highest index first.
@@ -175,7 +178,7 @@ func (r *Raft) takeSnapshot() (string, error) {
 	r.logger.Printf("[INFO] raft: Starting snapshot up to %d", snapReq.index)
 	start := time.Now()
 	version := getSnapshotVersion(r.protocolVersion)
-	sink, err := r.snapshots.Create(version, snapReq.index, snapReq.term, committed, committedIndex, r.trans)
+	sink, err := r.snapshots.Create(version, snapReq.index, snapReq.term, committed, committedIndex, r.nextClientId, r.trans)
 	if err != nil {
 		return "", fmt.Errorf("failed to create snapshot: %v", err)
 	}

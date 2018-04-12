@@ -271,6 +271,7 @@ func RecoverCluster(conf *Config, fsm FSM, logs LogStore, stable StableStore,
 	// Attempt to restore any snapshots we find, newest to oldest.
 	var snapshotIndex uint64
 	var snapshotTerm uint64
+    var snapshotClientId uint64
 	snapshots, err := snaps.List()
 	if err != nil {
 		return fmt.Errorf("failed to list snapshots: %v", err)
@@ -291,6 +292,7 @@ func RecoverCluster(conf *Config, fsm FSM, logs LogStore, stable StableStore,
 
 		snapshotIndex = snapshot.Index
 		snapshotTerm = snapshot.Term
+        snapshotClientId = snapshot.NextClientId
 		break
 	}
 	if len(snapshots) > 0 && (snapshotIndex == 0 || snapshotTerm == 0) {
@@ -301,6 +303,7 @@ func RecoverCluster(conf *Config, fsm FSM, logs LogStore, stable StableStore,
 	// until we play back the Raft log entries.
 	lastIndex := snapshotIndex
 	lastTerm := snapshotTerm
+    lastClientId := snapshotClientId
 
 	// Apply any Raft log entries past the snapshot.
 	lastLogIndex, err := logs.LastIndex()
@@ -315,6 +318,11 @@ func RecoverCluster(conf *Config, fsm FSM, logs LogStore, stable StableStore,
 		if entry.Type == LogCommand {
 			_,_ = fsm.Apply(&entry)
 		}
+        if entry.Type == LogNextClientId {
+            if err := decodeMsgPack(entry.Data, &lastClientId); err != nil {
+                panic(fmt.Errorf("failed to decode next cliend id: %v", err))
+            }
+        }
 		lastIndex = entry.Index
 		lastTerm = entry.Term
 	}
@@ -326,7 +334,7 @@ func RecoverCluster(conf *Config, fsm FSM, logs LogStore, stable StableStore,
 		return fmt.Errorf("failed to snapshot FSM: %v", err)
 	}
 	version := getSnapshotVersion(conf.ProtocolVersion)
-	sink, err := snaps.Create(version, lastIndex, lastTerm, configuration, 1, trans)
+	sink, err := snaps.Create(version, lastIndex, lastTerm, configuration, 1, lastClientId, trans)
 	if err != nil {
 		return fmt.Errorf("failed to create snapshot: %v", err)
 	}
