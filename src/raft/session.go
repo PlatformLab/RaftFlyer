@@ -13,9 +13,9 @@ type Session struct {
     stopCh              chan bool
     active              bool
     // Client ID assigned by cluster for use in RIFL. 
-    clientID            int64
+    clientID            uint64
     // Sequence number of next RPC for use in RIFL.
-    rpcSeqNo            int64
+    rpcSeqNo            uint64
 }
 
 
@@ -29,12 +29,18 @@ func CreateClientSession(trans *NetworkTransport, addrs []ServerAddress) (*Sessi
         stopCh : make(chan bool, 1),
         rpcSeqNo: 0,
     }
-    session.clientID = 0    // TODO: get this value from the server
     var err error
     session.currConn, err = findActiveServerWithTrans(addrs, trans)
     if err != nil {
         return nil ,err
     }
+    req := ClientIdRequest{}
+    resp := ClientIdResponse{}
+    err = session.sendToActiveLeader(&req, &resp)
+    if err != nil {
+        return nil, err
+    }
+    session.clientID = resp.ClientID
     return session, nil
 }
 
@@ -75,7 +81,7 @@ func (s *Session) CloseClientSession() error {
     return nil
 }
 
-func (s *Session) sendToActiveLeader(request *ClientRequest, response *ClientResponse) error {
+func (s *Session) sendToActiveLeader(request interface{}, response GenericClientResponse) error {
     var err error = errors.New("")
     retries := 5
     /* Send heartbeat to active leader. Connect to active leader if connection no longer to active leader. */
@@ -109,8 +115,8 @@ func (s *Session) sendToActiveLeader(request *ClientRequest, response *ClientRes
         }
         _, err = decodeResponse(s.currConn, &response)
         if err != nil {
-            if response != nil && response.LeaderAddress != "" {
-                s.currConn, _ = s.trans.getConn(response.LeaderAddress)
+            if response != nil && response.GetLeaderAddress() != "" {
+                s.currConn, _ = s.trans.getConn(response.GetLeaderAddress())
              } else {
                 /* Wait for leader to be elected. */
                 time.Sleep(1000*time.Millisecond)

@@ -150,15 +150,19 @@ func (r *InstallSnapshotResponse) GetRPCHeader() RPCHeader {
 	return r.RPCHeader
 }
 
+type GenericClientResponse interface {
+    GetLeaderAddress() ServerAddress
+}
+
 type ClientRequest struct {
     RPCHeader
 
     // New entries to commit. 
     Entries[] *Log
     // ID of client, for use in RIFL.
-    ClientID    int64
+    ClientID    uint64
     // Sequence number of RPC, for use in RIFL.
-    SeqNo       int64
+    SeqNo       uint64
 }
 
 // See WithRPCHeader.
@@ -177,6 +181,10 @@ type ClientResponse struct {
 // See WithRPCHeader.
 func (r *ClientResponse) GetRPCHeader() RPCHeader {
 	return r.RPCHeader
+}
+
+func (r *ClientResponse) GetLeaderAddress() ServerAddress {
+    return r.LeaderAddress
 }
 
 type ClientIdRequest struct {
@@ -201,5 +209,9 @@ type ClientIdResponse struct {
 // See WithRPCHeader.
 func (r *ClientIdResponse) GetRPCHeader() RPCHeader {
 	return r.RPCHeader
+}
+
+func (r *ClientIdResponse) GetLeaderAddress() ServerAddress {
+    return r.LeaderAddress
 }
 
