@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"time"
+    "encoding/json"
 
 	"github.com/armon/go-metrics"
 )
@@ -15,7 +16,7 @@ type FSM interface {
 	// It returns a value which will be made available in the
 	// ApplyFuture returned by Raft.Apply method if that
 	// method was called on the same Raft node as the FSM.
-	Apply(*Log) (interface{}, []func() [][]byte)
+	Apply(*Log) (interface{})
 
 	// Snapshot is used to support log compaction. This call should
 	// return an FSMSnapshot which can be used to save a point-in-time
@@ -52,12 +53,24 @@ func (r *Raft) runFSM() {
 	commit := func(req *commitTuple) {
 		// Apply the log if a command
         var resp interface{}
-        var callback []func() [][]byte
 		if req.log.Type == LogCommand {
 			start := time.Now()
-            resp, callback = r.fsm.Apply(req.log)
+            resp = r.fsm.Apply(req.log)
 			metrics.MeasureSince([]string{"raft", "fsm", "apply"}, start)
-		}
+            // Add response to clientResponseCache.
+            clientCache, ok := r.clientResponseCache[req.log.ClientID]
+            if !ok {
+                panic(fmt.Errorf("Bad client ID %v found when applying command", req.log.ClientID))
+            }
+            data, err := json.Marshal(resp)
+            if err != nil {
+                r.logger.Printf("err: %v", err)
+            }
+            clientCache[req.log.SeqNo] = &clientResponseEntry {
+                responseData:   data,
+                timestamp:      time.Now(),
+            }
+        }
 
 		// Update the indexes
 		lastIndex = req.log.Index
@@ -66,7 +79,6 @@ func (r *Raft) runFSM() {
 		// Invoke the future if given
 		if req.future != nil {
 			req.future.response = resp
-            req.future.callback = callback
 			req.future.respond(nil)
 		}
 	}

@@ -50,6 +50,12 @@ type Log struct {
 
 	// Data holds the log entry's type-specific data.
 	Data []byte
+
+    // Client ID. Only used for LogCommand.
+    ClientID uint64
+
+    // Sequence number of command. Only used for LogCommand.
+    SeqNo uint64
 }
 
 // LogStore is used to provide an interface for storing

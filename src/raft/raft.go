@@ -1441,21 +1441,9 @@ func (r *Raft) applyCommand(command []byte, resp *ClientResponse, rpcErr *error)
         *rpcErr = f.Error()
         resp.Success = false
     }
-    /* If callback, make leader execute callback */
-    var nextCommands [][]byte
-    callbacks := f.Callback()
-    for _,callback := range callbacks {
-        commands := callback()
-        for _, command := range commands {
-            nextCommands = append(nextCommands, command)
-        }
-    }
     data, _:= json.Marshal(f.Response())
     resp.ResponseData = data
     resp.Success = true
-    for _,nextCommand := range nextCommands {
-        r.applyCommand(nextCommand, resp, rpcErr)
-    }
 }
 
 // setLastContact is used to set the last contact time to now

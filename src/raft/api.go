@@ -326,7 +326,7 @@ func RecoverCluster(conf *Config, fsm FSM, logs LogStore, stable StableStore,
 			return fmt.Errorf("failed to get log at index %d: %v", index, err)
 		}
 		if entry.Type == LogCommand {
-			_,_ = fsm.Apply(&entry)
+			_ = fsm.Apply(&entry)
 		}
         if entry.Type == LogNextClientId {
             if err := decodeMsgPack(entry.Data, &lastClientId); err != nil {
