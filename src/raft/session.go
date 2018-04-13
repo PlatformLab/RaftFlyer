@@ -62,11 +62,9 @@ func (s *Session) SendRequest(data []byte, resp *ClientResponse) error {
         RPCHeader: RPCHeader {
             ProtocolVersion: ProtocolVersionMax,
         },
-        Entries: []*Log{
-            &Log {
-                Type: LogCommand,
-                Data: data,
-            },
+        Entry: &Log {
+            Type: LogCommand,
+            Data: data,
         },
         ClientID: s.clientID,
         SeqNo: s.rpcSeqNo,

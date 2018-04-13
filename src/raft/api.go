@@ -48,6 +48,10 @@ var (
 	// ErrCantBootstrap is returned when attempt is made to bootstrap a
 	// cluster that already has state present.
 	ErrCantBootstrap = errors.New("bootstrap only works on new clusters")
+
+    // ErrBadClientId is returned when a client issues a RPC with a client
+    // ID the cluster doesn't recognize.
+    ErrBadClientId = errors.New("bad client ID used")
 )
 
 // Raft implements a Raft node.
@@ -108,6 +112,12 @@ type Raft struct {
 	// LogStore provides durable storage for logs
 	logs LogStore
 
+    // Cache of client responses. Used for RIFL. Map of ClientIDs to
+    // map of client RPC sequence numbers to response data. Periodically
+    // garbage collected.
+    clientResponseCache map[uint64]map[uint64]*clientResponseEntry
+    clientResponseLock  sync.Mutex
+
 	// Used to request the leader to make configuration changes.
 	configurationChangeCh chan *configurationChangeFuture
 
@@ -124,7 +134,7 @@ type Raft struct {
 	// Shutdown channel to exit, protected to prevent concurrent exits
 	shutdown     bool
 	shutdownCh   chan struct{}
-	shutdownLock sync.Mutex
+	shutdownLock sync.RWMutex
 
 	// snapshots is used to store and retrieve snapshots
 	snapshots SnapshotStore
@@ -451,7 +461,8 @@ func NewRaft(conf *Config, fsm FSM, logs LogStore, stable StableStore, snaps Sna
 		protocolVersion: protocolVersion,
         applyCh:         make(chan *logFuture),
 		conf:            *conf,
-		fsm:             fsm,
+        clientResponseCache:    make(map[uint64]map[uint64]*clientResponseEntry),
+        fsm:             fsm,
 		fsmMutateCh:     make(chan interface{}, 128),
 		fsmSnapshotCh:   make(chan *reqSnapshotFuture),
 		leaderCh:        make(chan bool),

@@ -157,8 +157,8 @@ type GenericClientResponse interface {
 type ClientRequest struct {
     RPCHeader
 
-    // New entries to commit. 
-    Entries[] *Log
+    // New entry to commit. 
+    Entry *Log
     // ID of client, for use in RIFL.
     ClientID    uint64
     // Sequence number of RPC, for use in RIFL.

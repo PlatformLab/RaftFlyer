@@ -85,6 +85,13 @@ type leaderState struct {
 	stepDown   chan struct{}
 }
 
+// clientResponse holds state about the response to a client RPC.
+// For use in RIFL.
+type clientResponseEntry struct {
+    responseData        []byte
+    timestamp   time.Time
+}
+
 // setLeader is used to modify the current leader of the cluster
 func (r *Raft) setLeader(leader ServerAddress) {
 	r.leaderLock.Lock()
@@ -1374,6 +1381,9 @@ func (r *Raft) clientIdRequest(rpc RPC, c *ClientIdRequest) {
     if (r.getState() == Leader) {
         resp.ClientID = r.nextClientId
         r.nextClientId += 1
+        r.clientResponseLock.Lock()
+        r.clientResponseCache[resp.ClientID] = make(map[uint64]*clientResponseEntry)
+        r.clientResponseLock.Unlock()
         r.logger.Printf("Client ID to send is %v", r.nextClientId)
         go func(r *Raft, resp *ClientIdResponse, rpc RPC) {
             f := r.SendNextClientId(0)
@@ -1394,23 +1404,32 @@ func (r *Raft) clientRequest(rpc RPC, c *ClientRequest) {
         Success : false,
         LeaderAddress : leader,
     }
+    // Check if client ID is valid.
+    clientCache, ok := r.clientResponseCache[c.ClientID]
+    if !ok {
+        rpc.Respond(resp, ErrBadClientId)
+        return
+    }
+    // Check if RPC has already been executed and result is cached.
+    cachedResp, ok := clientCache[c.SeqNo]
+    if ok {
+        resp.ResponseData = cachedResp.responseData
+        resp.Success = true
+        rpc.Respond(resp, nil)
+        return
+    }
+    // Check if request has already been made.
     // Have we contacted the leader?
-    var rpcErr error
     if (r.getState() == Leader) {
         // Apply all commands in client request.
         go func(r *Raft, resp *ClientResponse, rpc RPC, c *ClientRequest) {
             var rpcErr error
-            for _,entry := range(c.Entries) {
-                if (entry != nil) {
-                    r.applyCommand(entry.Data, resp, &rpcErr)
-                }
-            }
+            r.applyCommand(c.Entry.Data, resp, &rpcErr)
             rpc.Respond(resp, rpcErr)
         }(r, resp, rpc, c)
     } else {
-        rpcErr = ErrNotLeader
         resp.Success = false
-        rpc.Respond(resp, rpcErr)
+        rpc.Respond(resp, ErrNotLeader)
     }
 }
 
