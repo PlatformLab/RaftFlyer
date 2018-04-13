@@ -31,23 +31,23 @@ func CreateWorkers(n int) ([]raft.FSM) {
 
 // TODO: remove callbacks from raft
 // Apply command to FSM and return response and callback
-func (w *WorkerFSM) Apply(log *raft.Log)(interface{}, []func() [][]byte) {
+func (w *WorkerFSM) Apply(log *raft.Log)(interface{}) {
     args := make(map[string]string)
     err := json.Unmarshal(log.Data, &args)
     if err != nil {
         fmt.Println("Poorly formatted request: ", err)
-        return nil, nil
+        return nil
     }
     function := args[FunctionArg]
     switch function {
         case GetCommand:
-            return GetResponse{Value: w.KeyValMap[args[KeyArg]]}, nil
+            return GetResponse{Value: w.KeyValMap[args[KeyArg]]}
         case SetCommand:
             w.KeyValMap[args[KeyArg]] = args[ValueArg]
-            return nil, nil
+            return nil
 
     }
-    return nil, []func()[][]byte{}
+    return nil
 }
 
 // TODO: implement for key-value store

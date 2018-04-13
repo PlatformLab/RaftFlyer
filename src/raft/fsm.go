@@ -58,9 +58,11 @@ func (r *Raft) runFSM() {
             resp = r.fsm.Apply(req.log)
 			metrics.MeasureSince([]string{"raft", "fsm", "apply"}, start)
             // Add response to clientResponseCache.
+            r.clientResponseLock.Lock()
             clientCache, ok := r.clientResponseCache[req.log.ClientID]
             if !ok {
-                panic(fmt.Errorf("Bad client ID %v found when applying command", req.log.ClientID))
+                r.clientResponseCache[req.log.ClientID] = make(map[uint64]*clientResponseEntry)
+                clientCache = r.clientResponseCache[req.log.ClientID]
             }
             data, err := json.Marshal(resp)
             if err != nil {
@@ -70,6 +72,7 @@ func (r *Raft) runFSM() {
                 responseData:   data,
                 timestamp:      time.Now(),
             }
+            r.clientResponseLock.Unlock()
         }
 
 		// Update the indexes

@@ -1405,9 +1405,11 @@ func (r *Raft) clientRequest(rpc RPC, c *ClientRequest) {
         LeaderAddress : leader,
     }
     // Check if client ID is valid.
+    r.clientResponseLock.RLock()
     clientCache, ok := r.clientResponseCache[c.ClientID]
     if !ok {
         rpc.Respond(resp, ErrBadClientId)
+        r.clientResponseLock.RUnlock()
         return
     }
     // Check if RPC has already been executed and result is cached.
@@ -1416,8 +1418,10 @@ func (r *Raft) clientRequest(rpc RPC, c *ClientRequest) {
         resp.ResponseData = cachedResp.responseData
         resp.Success = true
         rpc.Respond(resp, nil)
+        r.clientResponseLock.RUnlock()
         return
     }
+    r.clientResponseLock.RUnlock()
     // Check if request has already been made.
     // Have we contacted the leader?
     if (r.getState() == Leader) {

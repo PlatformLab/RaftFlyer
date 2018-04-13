@@ -116,7 +116,7 @@ type Raft struct {
     // map of client RPC sequence numbers to response data. Periodically
     // garbage collected.
     clientResponseCache map[uint64]map[uint64]*clientResponseEntry
-    clientResponseLock  sync.Mutex
+    clientResponseLock  sync.RWMutex
 
 	// Used to request the leader to make configuration changes.
 	configurationChangeCh chan *configurationChangeFuture
@@ -134,7 +134,7 @@ type Raft struct {
 	// Shutdown channel to exit, protected to prevent concurrent exits
 	shutdown     bool
 	shutdownCh   chan struct{}
-	shutdownLock sync.RWMutex
+	shutdownLock sync.Mutex
 
 	// snapshots is used to store and retrieve snapshots
 	snapshots SnapshotStore
