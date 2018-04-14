@@ -545,7 +545,8 @@ func NewRaft(conf *Config, fsm FSM, logs LogStore, stable StableStore, snaps Sna
 	r.goFunc(r.run)
 	r.goFunc(r.runFSM)
 	r.goFunc(r.runSnapshots)
-	return r, nil
+    r.goFunc(r.runGcClientResponseCache)
+    return r, nil
 }
 
 // restoreSnapshot attempts to restore the latest snapshots, and fails if none

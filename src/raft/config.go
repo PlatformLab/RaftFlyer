@@ -193,6 +193,14 @@ type Config struct {
 	// Logger is a user-provided logger. If nil, a logger writing to LogOutput
 	// is used.
 	Logger *log.Logger
+
+    // Interval at which to garbage collect the client response cache used with
+    // RIFL.
+    ClientResponseGcInterval time.Duration
+
+    // How long a client response should be kept in the cache to prevent duplicate
+    // execution. Used with RIFL.
+    ClientResponseGcRemoveTime time.Duration
 }
 
 // DefaultConfig returns a Config with usable defaults.
@@ -208,6 +216,8 @@ func DefaultConfig() *Config {
 		SnapshotInterval:   120 * time.Second,
 		SnapshotThreshold:  8192,
 		LeaderLeaseTimeout: 500 * time.Millisecond,
+        ClientResponseGcInterval:   time.Minute,
+        ClientResponseGcRemoveTime: 4 * time.Hour,
 	}
 }
 

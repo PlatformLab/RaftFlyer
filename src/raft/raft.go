@@ -85,13 +85,6 @@ type leaderState struct {
 	stepDown   chan struct{}
 }
 
-// clientResponse holds state about the response to a client RPC.
-// For use in RIFL.
-type clientResponseEntry struct {
-    responseData        []byte
-    timestamp   time.Time
-}
-
 // setLeader is used to modify the current leader of the cluster
 func (r *Raft) setLeader(leader ServerAddress) {
 	r.leaderLock.Lock()
