@@ -61,17 +61,18 @@ func (r *Raft) runFSM() {
             r.clientResponseLock.Lock()
             clientCache, ok := r.clientResponseCache[req.log.ClientID]
             if !ok {
-                r.clientResponseCache[req.log.ClientID] = make(map[uint64]*clientResponseEntry)
+                r.clientResponseCache[req.log.ClientID] = make(map[uint64]clientResponseEntry)
                 clientCache = r.clientResponseCache[req.log.ClientID]
             }
             data, err := json.Marshal(resp)
             if err != nil {
                 r.logger.Printf("err: %v", err)
             }
-            clientCache[req.log.SeqNo] = &clientResponseEntry {
+            clientCache[req.log.SeqNo] = clientResponseEntry {
                 responseData:   data,
                 timestamp:      time.Now(),
             }
+            r.clientResponseCache[req.log.ClientID] = clientCache
             r.clientResponseLock.Unlock()
         }
 

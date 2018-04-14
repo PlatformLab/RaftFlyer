@@ -752,7 +752,7 @@ func (r *Raft) restoreUserSnapshot(meta *SnapshotMeta, reader io.Reader) error {
 	// Dump the snapshot. Note that we use the latest configuration,
 	// not the one that came with the snapshot.
 	sink, err := r.snapshots.Create(version, lastIndex, term,
-		r.configurations.latest, r.configurations.latestIndex, r.nextClientId, r.trans)
+		r.configurations.latest, r.configurations.latestIndex, r.nextClientId, r.clientResponseCache, r.trans)
 	if err != nil {
 		return fmt.Errorf("failed to create snapshot: %v", err)
 	}
@@ -1297,7 +1297,7 @@ func (r *Raft) installSnapshot(rpc RPC, req *InstallSnapshotRequest) {
 	}
 	version := getSnapshotVersion(r.protocolVersion)
 	sink, err := r.snapshots.Create(version, req.LastLogIndex, req.LastLogTerm,
-		reqConfiguration, reqConfigurationIndex, r.nextClientId, r.trans)
+		reqConfiguration, reqConfigurationIndex, r.nextClientId, r.clientResponseCache, r.trans)
 	if err != nil {
 		r.logger.Printf("[ERR] raft: Failed to create snapshot to install: %v", err)
 		rpcErr = fmt.Errorf("failed to create snapshot: %v", err)
@@ -1382,7 +1382,7 @@ func (r *Raft) clientIdRequest(rpc RPC, c *ClientIdRequest) {
         resp.ClientID = r.nextClientId
         r.nextClientId += 1
         r.clientResponseLock.Lock()
-        r.clientResponseCache[resp.ClientID] = make(map[uint64]*clientResponseEntry)
+        r.clientResponseCache[resp.ClientID] = make(map[uint64]clientResponseEntry)
         r.clientResponseLock.Unlock()
         r.logger.Printf("Client ID to send is %v", r.nextClientId)
         go func(r *Raft, resp *ClientIdResponse, rpc RPC) {

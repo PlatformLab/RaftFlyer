@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"sync"
 	"time"
+    "encoding/json"
 
 	"github.com/armon/go-metrics"
 )
@@ -115,7 +116,7 @@ type Raft struct {
     // Cache of client responses. Used for RIFL. Map of ClientIDs to
     // map of client RPC sequence numbers to response data. Periodically
     // garbage collected.
-    clientResponseCache map[uint64]map[uint64]*clientResponseEntry
+    clientResponseCache map[uint64]map[uint64]clientResponseEntry
     clientResponseLock  sync.RWMutex
 
 	// Used to request the leader to make configuration changes.
@@ -282,6 +283,7 @@ func RecoverCluster(conf *Config, fsm FSM, logs LogStore, stable StableStore,
 	var snapshotIndex uint64
 	var snapshotTerm uint64
     var snapshotClientId uint64
+    var snapshotClientResponseCache map[uint64]map[uint64]clientResponseEntry
 	snapshots, err := snaps.List()
 	if err != nil {
 		return fmt.Errorf("failed to list snapshots: %v", err)
@@ -303,6 +305,7 @@ func RecoverCluster(conf *Config, fsm FSM, logs LogStore, stable StableStore,
 		snapshotIndex = snapshot.Index
 		snapshotTerm = snapshot.Term
         snapshotClientId = snapshot.NextClientId
+        snapshotClientResponseCache = snapshot.ClientResponseCache
 		break
 	}
 	if len(snapshots) > 0 && (snapshotIndex == 0 || snapshotTerm == 0) {
@@ -314,6 +317,7 @@ func RecoverCluster(conf *Config, fsm FSM, logs LogStore, stable StableStore,
 	lastIndex := snapshotIndex
 	lastTerm := snapshotTerm
     lastClientId := snapshotClientId
+    lastClientResponseCache := snapshotClientResponseCache
 
 	// Apply any Raft log entries past the snapshot.
 	lastLogIndex, err := logs.LastIndex()
@@ -326,7 +330,20 @@ func RecoverCluster(conf *Config, fsm FSM, logs LogStore, stable StableStore,
 			return fmt.Errorf("failed to get log at index %d: %v", index, err)
 		}
 		if entry.Type == LogCommand {
-			_ = fsm.Apply(&entry)
+            resp := fsm.Apply(&entry)
+            data, err := json.Marshal(resp)
+            if err != nil {
+                return fmt.Errorf("failed to marshal response to command at index %d: %v", index, err)
+            }
+            clientCache, ok := lastClientResponseCache[entry.ClientID]
+            if !ok {
+                clientCache = make(map[uint64]clientResponseEntry)
+            }
+            clientCache[entry.SeqNo] = clientResponseEntry {
+                responseData:   data,
+                timestamp:      time.Now(),     // will be garbage collected later
+            }
+            lastClientResponseCache[entry.ClientID] = clientCache
 		}
         if entry.Type == LogNextClientId {
             if err := decodeMsgPack(entry.Data, &lastClientId); err != nil {
@@ -344,7 +361,7 @@ func RecoverCluster(conf *Config, fsm FSM, logs LogStore, stable StableStore,
 		return fmt.Errorf("failed to snapshot FSM: %v", err)
 	}
 	version := getSnapshotVersion(conf.ProtocolVersion)
-	sink, err := snaps.Create(version, lastIndex, lastTerm, configuration, 1, lastClientId, trans)
+	sink, err := snaps.Create(version, lastIndex, lastTerm, configuration, 1, lastClientId, lastClientResponseCache, trans)
 	if err != nil {
 		return fmt.Errorf("failed to create snapshot: %v", err)
 	}
@@ -461,7 +478,7 @@ func NewRaft(conf *Config, fsm FSM, logs LogStore, stable StableStore, snaps Sna
 		protocolVersion: protocolVersion,
         applyCh:         make(chan *logFuture),
 		conf:            *conf,
-        clientResponseCache:    make(map[uint64]map[uint64]*clientResponseEntry),
+        clientResponseCache:    make(map[uint64]map[uint64]clientResponseEntry),
         fsm:             fsm,
 		fsmMutateCh:     make(chan interface{}, 128),
 		fsmSnapshotCh:   make(chan *reqSnapshotFuture),
