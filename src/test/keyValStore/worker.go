@@ -12,6 +12,7 @@ import(
 type WorkerFSM struct {
     // Map representing key-value store.
     KeyValMap       map[string]string
+    counter         uint64
 }
 
 // Create array of worker FSMs for starting a cluster.
@@ -20,6 +21,7 @@ func CreateWorkers(n int) ([]raft.FSM) {
     for i := range workers {
         workers[i] = &WorkerFSM{
             KeyValMap:  make(map[string]string),
+            counter:    0,
         }
     }
     fsms := make([]raft.FSM, n)
@@ -45,7 +47,9 @@ func (w *WorkerFSM) Apply(log *raft.Log)(interface{}) {
         case SetCommand:
             w.KeyValMap[args[KeyArg]] = args[ValueArg]
             return nil
-
+        case IncCommand:
+            w.counter += 1
+            return IncResponse{Value: w.counter}
     }
     return nil
 }

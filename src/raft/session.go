@@ -10,8 +10,6 @@ type Session struct {
     trans               *NetworkTransport
     currConn            *netConn
     raftServers         []ServerAddress
-    stopCh              chan bool
-    active              bool
     // Client ID assigned by cluster for use in RIFL. 
     clientID            uint64
     // Sequence number of next RPC for use in RIFL.
@@ -25,8 +23,6 @@ func CreateClientSession(trans *NetworkTransport, addrs []ServerAddress) (*Sessi
     session := &Session{
         trans: trans,
         raftServers: addrs,
-        active: true,
-        stopCh : make(chan bool, 1),
         rpcSeqNo: 0,
     }
     var err error
@@ -52,9 +48,6 @@ func CreateClientSession(trans *NetworkTransport, addrs []ServerAddress) (*Sessi
 
 /* Make request to open session. */
 func (s *Session) SendRequest(data []byte, resp *ClientResponse) error {
-    if !s.active {
-        return errors.New("Inactive client session.")
-    }
     if resp == nil {
         return errors.New("Response is nil")
     }
@@ -73,13 +66,29 @@ func (s *Session) SendRequest(data []byte, resp *ClientResponse) error {
     return s.sendToActiveLeader(&req, resp, rpcClientRequest)
 }
 
-
-/* Close client session. Kill heartbeat go routine. */
-func (s *Session) CloseClientSession() error {
-    if !s.active {
-        return errors.New("Inactive client session")
+/* Make request to open session. Only use for testing purposes! */
+func (s *Session) SendRequestWithSeqno(data []byte, resp *ClientResponse, seqno uint64) error {
+    if resp == nil {
+        return errors.New("Response is nil")
     }
-    s.stopCh <- true
+    req := ClientRequest {
+        RPCHeader: RPCHeader {
+            ProtocolVersion: ProtocolVersionMax,
+        },
+        Entry: &Log {
+            Type: LogCommand,
+            Data: data,
+        },
+        ClientID: s.clientID,
+        SeqNo: seqno,
+    }
+    return s.sendToActiveLeader(&req, resp, rpcClientRequest)
+}
+
+
+
+/* Close client session. TODO: GC client request tables. */
+func (s *Session) CloseClientSession() error {
     fmt.Println("closed client session")
     return nil
 }
@@ -90,23 +99,19 @@ func (s *Session) sendToActiveLeader(request interface{}, response GenericClient
     /* Send heartbeat to active leader. Connect to active leader if connection no longer to active leader. */
     for err != nil {
         if retries <= 0 {
-            s.active = false
             return errors.New("Failed to find active leader.")
         }
         if s.currConn == nil {
-            s.active = false
             return errors.New("No current connection.")
         }
         err = sendRPC(s.currConn, rpcType, request)
         /* Try another server if server went down. */
         for err != nil {
             if retries <= 0 {
-                s.active = false
                 return errors.New("Failed to find active leader.")
             }
             s.currConn, err = findActiveServerWithTrans(s.raftServers, s.trans)
             if err != nil || s.currConn == nil {
-                s.active = false
                 return errors.New("No active server found.")
             }
             retries--

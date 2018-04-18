@@ -15,7 +15,10 @@ func main() {
         return
     }
     servers := []raft.ServerAddress{"127.0.0.1:8000","127.0.0.1:8001","127.0.0.1:8002"}
-    c := keyValStore.CreateClient(trans, servers)
+    c, createErr := keyValStore.CreateClient(trans, servers)
+    if createErr != nil {
+        fmt.Println("Can't create client session", createErr)
+    }
     c.Set("foo","bar")
     str, getErr := c.Get("foo")
     if getErr != nil || strings.Compare(str,"bar") != 0 {

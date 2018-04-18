@@ -1408,6 +1408,7 @@ func (r *Raft) clientRequest(rpc RPC, c *ClientRequest) {
     // Check if RPC has already been executed and result is cached.
     cachedResp, ok := clientCache[c.SeqNo]
     if ok {
+        r.logger.Printf("response is cached for seq no %v", c.SeqNo)
         resp.ResponseData = cachedResp.responseData
         resp.Success = true
         rpc.Respond(resp, nil)

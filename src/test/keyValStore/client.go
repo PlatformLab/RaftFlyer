@@ -15,22 +15,63 @@ type Client struct {
 }
 
 // Create new client for sending RPCs.
-func CreateClient(trans *raft.NetworkTransport, servers []raft.ServerAddress) (*Client) {
+func CreateClient(trans *raft.NetworkTransport, servers []raft.ServerAddress) (*Client, error) {
+    newSession, err := raft.CreateClientSession(trans, servers)
+    if err != nil {
+        return nil, err
+    }
     return &Client {
         trans:      trans,
         servers:    servers,
-        session:    nil,
-    }
+        session:    newSession,
+    }, nil
 }
 
 // Cleanup associated with client.
-func (c *Client) DestroyClient() error {
-    if c.session != nil {
-        return c.session.CloseClientSession()
-    } else {
-        return nil
-    }
+func (c *Client) DestroyClient() {
+    c.session.CloseClientSession()
 }
+
+func (c *Client) Inc() (uint64, error) {
+    args := make(map[string]string)
+    args[FunctionArg] = IncCommand
+    data, marshal_err := json.Marshal(args)
+    if marshal_err != nil {
+        return 0, marshal_err
+    }
+    resp := raft.ClientResponse{}
+    sendErr := c.session.SendRequest(data, &resp)
+    if sendErr != nil {
+        return 0, sendErr
+    }
+    var response IncResponse
+    recvErr := json.Unmarshal(resp.ResponseData, &response)
+    if recvErr != nil {
+        return 0, recvErr
+    }
+    return response.Value, nil
+}
+
+func (c *Client) IncWithSeqno(seqno uint64) (uint64, error) {
+    args := make(map[string]string)
+    args[FunctionArg] = IncCommand
+    data, marshal_err := json.Marshal(args)
+    if marshal_err != nil {
+        return 0, marshal_err
+    }
+    resp := raft.ClientResponse{}
+    sendErr := c.session.SendRequestWithSeqno(data, &resp, seqno)
+    if sendErr != nil {
+        return 0, sendErr
+    }
+    var response IncResponse
+    recvErr := json.Unmarshal(resp.ResponseData, &response)
+    if recvErr != nil {
+        return 0, recvErr
+    }
+    return response.Value, nil
+}
+
 
 // Send RPC to set the value of a key. No expected response.
 func (c *Client) Set(key string, value string) error {
@@ -42,11 +83,7 @@ func (c *Client) Set(key string, value string) error {
     if marshal_err != nil  {
         return marshal_err
     }
-    session, session_err := c.getSession()
-    if session_err != nil {
-        return session_err
-    }
-    return session.SendRequest(data, &raft.ClientResponse{})
+    return c.session.SendRequest(data, &raft.ClientResponse{})
 }
 
 // Send RPC to get the value of a key. Empty string if error. 
@@ -59,11 +96,7 @@ func (c *Client) Get(key string) (string, error) {
         return "", marshal_err
     }
     resp := raft.ClientResponse{}
-    session, sessionErr := c.getSession()
-    if sessionErr != nil {
-        return "", sessionErr
-    }
-    sendErr := session.SendRequest(data, &resp)
+    sendErr := c.session.SendRequest(data, &resp)
     if sendErr != nil {
         return "", sendErr
     }
@@ -73,15 +106,4 @@ func (c *Client) Get(key string) (string, error) {
         return "", recvErr
     }
     return response.Value, nil
-}
-
-// Private method for opening new session if one doesn't exist.
-func (c *Client) getSession() (*raft.Session, error) {
-    existing := c.session
-    if existing != nil {
-        return existing, nil
-    }
-    newSession, err := raft.CreateClientSession(c.trans, c.servers)
-    c.session = newSession
-    return c.session, err
 }
