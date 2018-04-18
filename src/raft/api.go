@@ -340,8 +340,8 @@ func RecoverCluster(conf *Config, fsm FSM, logs LogStore, stable StableStore,
                 clientCache = make(map[uint64]clientResponseEntry)
             }
             clientCache[entry.SeqNo] = clientResponseEntry {
-                responseData:   data,
-                timestamp:      time.Now(),     // will be garbage collected later
+                response:   data,
+                timestamp:  time.Now(),     // will be garbage collected later
             }
             lastClientResponseCache[entry.ClientID] = clientCache
 		}
@@ -640,7 +640,7 @@ func (r *Raft) Leader() ServerAddress {
 // An optional timeout can be provided to limit the amount of time we wait
 // for the command to be started. This must be run on the leader or it
 // will fail.
-func (r *Raft) Apply(cmd []byte, timeout time.Duration) ApplyFuture {
+func (r *Raft) Apply(cmd []byte, clientId uint64, seqNo uint64, timeout time.Duration) ApplyFuture {
 	metrics.IncrCounter([]string{"raft", "apply"}, 1)
 	var timer <-chan time.Time
 	if timeout > 0 {
@@ -651,6 +651,8 @@ func (r *Raft) Apply(cmd []byte, timeout time.Duration) ApplyFuture {
 	logFuture := &logFuture{
 		log: Log{
 			Type: LogCommand,
+            ClientID: clientId,
+            SeqNo: seqNo,
 			Data: cmd,
 		},
 	}

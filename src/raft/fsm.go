@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"time"
-    "encoding/json"
 
 	"github.com/armon/go-metrics"
 )
@@ -54,25 +53,28 @@ func (r *Raft) runFSM() {
 		// Apply the log if a command
         var resp interface{}
 		if req.log.Type == LogCommand {
-			start := time.Now()
-            resp = r.fsm.Apply(req.log)
-			metrics.MeasureSince([]string{"raft", "fsm", "apply"}, start)
-            // Add response to clientResponseCache.
             r.clientResponseLock.Lock()
-            clientCache, ok := r.clientResponseCache[req.log.ClientID]
-            if !ok {
+            clientCache, clientIdKnown := r.clientResponseCache[req.log.ClientID]
+            if !clientIdKnown {
                 r.clientResponseCache[req.log.ClientID] = make(map[uint64]clientResponseEntry)
                 clientCache = r.clientResponseCache[req.log.ClientID]
             }
-            data, err := json.Marshal(resp)
-            if err != nil {
-                r.logger.Printf("err: %v", err)
+            cachedResp, duplicateReq := clientCache[req.log.SeqNo]
+            r.logger.Printf("looking at commamd from client %v with seq no %v", req.log.ClientID, req.log.SeqNo)
+            if duplicateReq {
+                r.logger.Printf("found cached response for client %v with seqno %v with resp %v", req.log.ClientID, req.log.SeqNo, cachedResp.response)
+                resp = cachedResp.response
+            } else {
+			    start := time.Now()
+                resp = r.fsm.Apply(req.log)
+                metrics.MeasureSince([]string{"raft", "fsm", "apply"}, start)
+                // Add response to clientResponseCache.
+                clientCache[req.log.SeqNo] = clientResponseEntry {
+                    response:   resp,
+                    timestamp:  time.Now(),
+                }
+                r.clientResponseCache[req.log.ClientID] = clientCache
             }
-            clientCache[req.log.SeqNo] = clientResponseEntry {
-                responseData:   data,
-                timestamp:      time.Now(),
-            }
-            r.clientResponseCache[req.log.ClientID] = clientCache
             r.clientResponseLock.Unlock()
         }
 

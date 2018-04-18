@@ -1399,30 +1399,19 @@ func (r *Raft) clientRequest(rpc RPC, c *ClientRequest) {
     }
     // Check if client ID is valid.
     r.clientResponseLock.RLock()
-    clientCache, ok := r.clientResponseCache[c.ClientID]
+    _, ok := r.clientResponseCache[c.ClientID]
+    r.clientResponseLock.RUnlock()
     if !ok {
         rpc.Respond(resp, ErrBadClientId)
-        r.clientResponseLock.RUnlock()
         return
     }
-    // Check if RPC has already been executed and result is cached.
-    cachedResp, ok := clientCache[c.SeqNo]
-    if ok {
-        r.logger.Printf("response is cached for seq no %v", c.SeqNo)
-        resp.ResponseData = cachedResp.responseData
-        resp.Success = true
-        rpc.Respond(resp, nil)
-        r.clientResponseLock.RUnlock()
-        return
-    }
-    r.clientResponseLock.RUnlock()
     // Check if request has already been made.
     // Have we contacted the leader?
     if (r.getState() == Leader) {
         // Apply all commands in client request.
         go func(r *Raft, resp *ClientResponse, rpc RPC, c *ClientRequest) {
             var rpcErr error
-            r.applyCommand(c.Entry.Data, resp, &rpcErr)
+            r.applyCommand(c.Entry.Data, c.ClientID, c.SeqNo, resp, &rpcErr)
             rpc.Respond(resp, rpcErr)
         }(r, resp, rpc, c)
     } else {
@@ -1432,8 +1421,8 @@ func (r *Raft) clientRequest(rpc RPC, c *ClientRequest) {
 }
 
 // Apply a command from leader to all raft FSMs. */
-func (r *Raft) applyCommand(command []byte, resp *ClientResponse, rpcErr *error) {
-    f := r.Apply(command, 0)
+func (r *Raft) applyCommand(command []byte, clientId uint64, seqNo uint64, resp *ClientResponse, rpcErr *error) {
+    f := r.Apply(command, clientId, seqNo, 0)
     if f.Error() != nil {
         r.logger.Printf("err: %v",f.Error())
         *rpcErr = f.Error()

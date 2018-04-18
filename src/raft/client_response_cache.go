@@ -7,7 +7,7 @@ import(
 // clientResponse holds state about the response to a client RPC.
 // For use in RIFL.
 type clientResponseEntry struct {
-    responseData        []byte
+    response       interface{} 
     timestamp   time.Time
 }
 
