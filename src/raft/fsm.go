@@ -60,7 +60,6 @@ func (r *Raft) runFSM() {
                 clientCache = r.clientResponseCache[req.log.ClientID]
             }
             cachedResp, duplicateReq := clientCache[req.log.SeqNo]
-            r.logger.Printf("looking at commamd from client %v with seq no %v", req.log.ClientID, req.log.SeqNo)
             if duplicateReq {
                 r.logger.Printf("found cached response for client %v with seqno %v with resp %v", req.log.ClientID, req.log.SeqNo, cachedResp.response)
                 resp = cachedResp.response
