@@ -8,6 +8,7 @@ import(
     "time"
     "strconv"
     "fmt"
+    "syscall"
 )
 
 // Optional first argument is interval at which to garbage collect entries from client response cache
@@ -38,5 +39,8 @@ func main() {
     keyValStore.MakeNewCluster(3, keyValStore.CreateWorkers(3), addrs, gcInterval, gcRemoveTime)
     c := make(chan os.Signal, 1)
     signal.Notify(c, os.Interrupt)
+    time.Sleep(time.Second)
+    syscall.Kill(syscall.Getpid(), syscall.SIGINT)
+    <-c
     <-c
 }

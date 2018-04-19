@@ -9,8 +9,22 @@ import(
 	"os"
 )
 
+
+func MakeNewCluster(n int, fsms []raft.FSM, addrs []raft.ServerAddress, gcInterval time.Duration, gcRemoveTime time.Duration) *cluster {
+    return MakeCluster(n, fsms, addrs, gcInterval, gcRemoveTime, nil)
+}
+
+func RestartCluster(c *cluster) {
+    for i := range c.fsms {
+        err := raft.RecoverCluster(c.conf, c.fsms[i], c.stores[i], c.stores[i], c.snaps[i], c.trans[i], c.configuration)
+        if err != nil {
+            fmt.Println("[ERR] err: %v", err)
+        }
+    }
+}
+
 // Starts up a new cluster.
-func MakeCluster(n int, fsms []raft.FSM, addrs []raft.ServerAddress, gcInterval time.Duration, gcRemoveTime time.Duration) *cluster {
+func MakeCluster(n int, fsms []raft.FSM, addrs []raft.ServerAddress, gcInterval time.Duration, gcRemoveTime time.Duration, startingCluster *cluster) *cluster {
     conf := raft.DefaultConfig()
     if gcInterval != 0 {
         conf.ClientResponseGcInterval = gcInterval
@@ -20,14 +34,13 @@ func MakeCluster(n int, fsms []raft.FSM, addrs []raft.ServerAddress, gcInterval 
     }
     bootstrap := true
 
-	c := &cluster{
+    c := &cluster{
 		conf:          conf,
 		// Propagation takes a maximum of 2 heartbeat timeouts (time to
 		// get a new heartbeat that would cause a commit) plus a bit.
 		propagateTimeout: conf.HeartbeatTimeout*2 + conf.CommitTimeout,
 		longstopTimeout:  5 * time.Second,
 	}
-	var configuration raft.Configuration
 
 	// Setup the stores and transports
 	for i := 0; i < n; i++ {
@@ -49,14 +62,12 @@ func MakeCluster(n int, fsms []raft.FSM, addrs []raft.ServerAddress, gcInterval 
         if err != nil {
             fmt.Println("[ERR] err creating transport: ", err)
         }
-        addr := trans.LocalAddr()
         c.trans = append(c.trans, trans)
-		localID := raft.ServerID(fmt.Sprintf("server-%s", addr))
-		configuration.Servers = append(configuration.Servers, raft.Server{
-			Suffrage: raft.Voter,
-			ID:       localID,
-			Address:  addr,
-		})
+        c.configuration.Servers = append(c.configuration.Servers, raft.Server{
+            Suffrage:   raft.Voter,
+            ID:         raft.ServerID(fmt.Sprintf("server-%s", trans.LocalAddr())),
+            Address:    addrs[i],
+        })
 	}
 
 	// Create all the rafts
@@ -68,11 +79,11 @@ func MakeCluster(n int, fsms []raft.FSM, addrs []raft.ServerAddress, gcInterval 
 		trans := c.trans[i]
 
 		peerConf := conf
-		peerConf.LocalID = configuration.Servers[i].ID
+		peerConf.LocalID = c.configuration.Servers[i].ID
         peerConf.Logger = log.New(os.Stdout, string(peerConf.LocalID) + " : ", log.Lmicroseconds)
 
 		if bootstrap {
-			err := raft.BootstrapCluster(peerConf, logs, store, snap, trans, configuration)
+			err := raft.BootstrapCluster(peerConf, logs, store, snap, trans, c.configuration)
 			if err != nil {
 				fmt.Println("[ERR] BootstrapCluster failed: %v", err)
 			}
@@ -101,4 +112,5 @@ type cluster struct {
 	propagateTimeout time.Duration
 	longstopTimeout  time.Duration
 	startTime        time.Time
+    configuration    raft.Configuration
 }
