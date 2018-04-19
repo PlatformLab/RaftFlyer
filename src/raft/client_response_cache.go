@@ -24,6 +24,7 @@ func (r *Raft) runGcClientResponseCache() {
 }
 
 func (r *Raft) gcClientResponseCache() {
+//    r.logger.Printf("**** GC CACHE ****")
     r.clientResponseLock.RLock()
     currTime := time.Now()
     for clientID, clientCache := range r.clientResponseCache {
