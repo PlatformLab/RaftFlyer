@@ -5,10 +5,9 @@ import (
     "fmt"
     "test/keyValStore"
     "time"
+    "test/utils"
+    "os"
 )
-
-var totalTests uint32
-var testsFailed uint32
 
 var c1 *keyValStore.Client
 var c2 *keyValStore.Client
@@ -16,38 +15,24 @@ var c2 *keyValStore.Client
 func main() {
     trans, transErr := raft.NewTCPTransport("127.0.0.1:5000", nil, 2, time.Second, nil)
     if transErr != nil {
-        fmt.Println("Error with creating TCP transport, could not run tests: ", transErr)
+        fmt.Fprintf(os.Stderr, "Error with creating TCP transport, could not run tests: ", transErr)
         return
     }
     var err error
     servers := []raft.ServerAddress{"127.0.0.1:8000","127.0.0.1:8001","127.0.0.1:8002"}
     c1, err = keyValStore.CreateClient(trans, servers)
     if err != nil {
-        fmt.Println("Error creating client session, could not run tests: ", err)
+        fmt.Fprintf(os.Stderr, "Error creating client session, could not run tests: ", err)
         return
     }
     c2, err = keyValStore.CreateClient(trans, servers)
     if err != nil {
-        fmt.Println("Error creating second client session, could not run tests: ", err)
+        fmt.Fprintf(os.Stderr, "Error creating second client session, could not run tests: ", err)
         return
     }
-    totalTests = 0
-    testsFailed = 0
 
-    runTest(testSameClientSameSeqno)
-    runTest(testSameClientDiffSeqno)
-    runTest(testDiffClientSameSeqno)
-
-    fmt.Println("***** BASIC RIFL TESTS FAILING: ", testsFailed, "/", totalTests, " *****")
-}
-
-func runTest(test func()(error)) {
-    err := test()
-    if err != nil {
-        fmt.Println("Error running test: ", err)
-        testsFailed += 1
-    }
-    totalTests += 1
+    testsFailed := utils.RunTestSuite(testSameClientSameSeqno, testSameClientDiffSeqno, testDiffClientSameSeqno)
+    fmt.Println(testsFailed)
 }
 
 func testSameClientSameSeqno() (error) {

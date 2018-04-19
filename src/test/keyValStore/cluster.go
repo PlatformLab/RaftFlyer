@@ -10,8 +10,14 @@ import(
 )
 
 // Starts up a new cluster.
-func MakeCluster(n int, fsms []raft.FSM, addrs []raft.ServerAddress) *cluster {
+func MakeCluster(n int, fsms []raft.FSM, addrs []raft.ServerAddress, gcInterval time.Duration, gcRemoveTime time.Duration) *cluster {
     conf := raft.DefaultConfig()
+    if gcInterval != 0 {
+        conf.ClientResponseGcInterval = gcInterval
+    }
+    if gcRemoveTime != 0 {
+        conf.ClientResponseGcRemoveTime = gcRemoveTime
+    }
     bootstrap := true
 
 	c := &cluster{

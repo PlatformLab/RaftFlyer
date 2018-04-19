@@ -2,7 +2,6 @@ package raft
 
 import (
     "time"
-    "fmt"
     "errors"
 )
 
@@ -41,7 +40,6 @@ func CreateClientSession(trans *NetworkTransport, addrs []ServerAddress) (*Sessi
         return nil, err
     }
     session.clientID = resp.ClientID
-    fmt.Println("New client id is ", session.clientID)
     return session, nil
 }
 
@@ -89,7 +87,6 @@ func (s *Session) SendRequestWithSeqno(data []byte, resp *ClientResponse, seqno 
 
 /* Close client session. TODO: GC client request tables. */
 func (s *Session) CloseClientSession() error {
-    fmt.Println("closed client session")
     return nil
 }
 
