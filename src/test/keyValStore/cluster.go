@@ -16,15 +16,43 @@ func MakeNewCluster(n int, fsms []raft.FSM, addrs []raft.ServerAddress, gcInterv
 
 func RestartCluster(c *cluster) {
     for i := range c.fsms {
-        err := raft.RecoverCluster(c.conf, c.fsms[i], c.stores[i], c.stores[i], c.snaps[i], c.trans[i], c.configuration)
+        trans, err := raft.NewTCPTransport(string(c.trans[i].LocalAddr()), nil, 2, time.Second, nil)
+        if err != nil {
+            fmt.Println("[ERR] err creating transport: ", err)
+        }
+        c.trans[i] = trans
+    }
+
+    for i := range c.fsms {
+		peerConf := c.conf
+		peerConf.LocalID = c.configuration.Servers[i].ID
+        peerConf.Logger = log.New(os.Stdout, string(peerConf.LocalID) + " : ", log.Lmicroseconds)
+
+       err := raft.RecoverCluster(peerConf, c.fsms[i], c.stores[i], c.stores[i], c.snaps[i], c.trans[i], c.configuration)
         if err != nil {
             fmt.Println("[ERR] err: %v", err)
+        }
+        raft, err := raft.NewRaft(peerConf, c.fsms[i], c.stores[i], c.stores[i], c.snaps[i], c.trans[i])
+		if err != nil {
+		    fmt.Println("[ERR] NewRaft failed: %v", err)
+		}
+
+		raft.AddVoter(peerConf.LocalID, c.trans[i].LocalAddr(), 0, 0)
+    }
+
+}
+
+func ShutdownCluster(nodes []*raft.Raft) {
+    for _,node := range nodes {
+        f := node.Shutdown()
+        if f.Error() != nil {
+            fmt.Println("Error shutting down cluster: ", f.Error())
         }
     }
 }
 
 // Starts up a new cluster.
-func MakeCluster(n int, fsms []raft.FSM, addrs []raft.ServerAddress, gcInterval time.Duration, gcRemoveTime time.Duration, startingCluster *cluster) *cluster {
+func MakeCluster(n int, fsms []raft.FSM, addrs []raft.ServerAddress, gcInterval time.Duration, gcRemoveTime time.Duration, startingCluster *cluster) (*cluster) {
     conf := raft.DefaultConfig()
     if gcInterval != 0 {
         conf.ClientResponseGcInterval = gcInterval
@@ -95,7 +123,7 @@ func MakeCluster(n int, fsms []raft.FSM, addrs []raft.ServerAddress, gcInterval 
 		}
 
 		raft.AddVoter(peerConf.LocalID, trans.LocalAddr(), 0, 0)
-		c.rafts = append(c.rafts, raft)
+		c.Rafts = append(c.Rafts, raft)
 	}
 
     return c
@@ -107,7 +135,7 @@ type cluster struct {
 	fsms             []raft.FSM
 	snaps            []*raft.FileSnapshotStore
 	trans            []raft.Transport
-	rafts            []*raft.Raft
+	Rafts            []*raft.Raft
 	conf             *raft.Config
 	propagateTimeout time.Duration
 	longstopTimeout  time.Duration

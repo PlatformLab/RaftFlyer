@@ -8,7 +8,6 @@ import(
     "time"
     "strconv"
     "fmt"
-    "syscall"
 )
 
 // Optional first argument is interval at which to garbage collect entries from client response cache
@@ -36,11 +35,12 @@ func main() {
         gcRemoveTime = time.Duration(removeTime) * time.Millisecond
     }
     addrs := []raft.ServerAddress{"127.0.0.1:8000","127.0.0.1:8001","127.0.0.1:8002"}
-    keyValStore.MakeNewCluster(3, keyValStore.CreateWorkers(3), addrs, gcInterval, gcRemoveTime)
+    cluster := keyValStore.MakeNewCluster(3, keyValStore.CreateWorkers(3), addrs, gcInterval, gcRemoveTime)
+    time.Sleep(time.Second)
+    keyValStore.ShutdownCluster(cluster.Rafts)
+    fmt.Println("Restarting cluster")
+    keyValStore.RestartCluster(cluster)
     c := make(chan os.Signal, 1)
     signal.Notify(c, os.Interrupt)
-    time.Sleep(time.Second)
-    syscall.Kill(syscall.Getpid(), syscall.SIGINT)
-    <-c
     <-c
 }

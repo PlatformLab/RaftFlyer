@@ -15,6 +15,8 @@ type WorkerFSM struct {
     counter         uint64
 }
 
+type WorkerSnapshot struct{}
+
 // Create array of worker FSMs for starting a cluster.
 func CreateWorkers(n int) ([]raft.FSM) {
     workers := make([]*WorkerFSM, n)
@@ -56,10 +58,14 @@ func (w *WorkerFSM) Apply(log *raft.Log)(interface{}) {
 
 // TODO: implement for key-value store
 func (w *WorkerFSM) Snapshot() (raft.FSMSnapshot, error) {
-    return nil, nil
+    return WorkerSnapshot{}, nil
 }
 
 // TODO: implement for key-value store
 func (w *WorkerFSM) Restore(i io.ReadCloser) error {
     return nil
 }
+
+func (s WorkerSnapshot) Persist(sink raft.SnapshotSink) error {return nil}
+
+func (s WorkerSnapshot) Release() {}
