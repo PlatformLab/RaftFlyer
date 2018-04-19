@@ -36,7 +36,7 @@ func main() {
     }
     addrs := []raft.ServerAddress{"127.0.0.1:8000","127.0.0.1:8001","127.0.0.1:8002"}
     cluster := keyValStore.MakeNewCluster(3, keyValStore.CreateWorkers(3), addrs, gcInterval, gcRemoveTime)
-    time.Sleep(time.Second)
+    time.Sleep(10*time.Second)
     keyValStore.ShutdownCluster(cluster.Rafts)
     fmt.Println("Restarting cluster")
     keyValStore.RestartCluster(cluster)
