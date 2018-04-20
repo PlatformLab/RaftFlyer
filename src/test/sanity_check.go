@@ -6,7 +6,10 @@ import (
     "fmt"
     "strings"
     "time"
+    "test/utils"
 )
+
+var c *keyValStore.Client
 
 func main() {
     trans, err := raft.NewTCPTransport("127.0.0.1:5000", nil, 2, time.Second, nil)
@@ -15,15 +18,24 @@ func main() {
         return
     }
     servers := []raft.ServerAddress{"127.0.0.1:8000","127.0.0.1:8001","127.0.0.1:8002"}
-    c, createErr := keyValStore.CreateClient(trans, servers)
-    if createErr != nil {
-        fmt.Println("Can't create client session", createErr)
+    c, err = keyValStore.CreateClient(trans, servers)
+    if err != nil {
+        fmt.Println("Can't create client session", err)
+        return
     }
+
+    testsFailed := utils.RunTestSuite(testSanityCheck)
+    fmt.Println(testsFailed)
+}
+
+func testSanityCheck() (error) {
     c.Set("foo","bar")
     str, getErr := c.Get("foo")
-    if getErr != nil || strings.Compare(str,"bar") != 0 {
-        fmt.Println("Failure: error was ", getErr, " and returned string was ", str)
-    } else {
-        fmt.Println("Success!")
+    if getErr != nil {
+        return fmt.Errorf("Error sending Get RPC: %v", getErr)
     }
+    if strings.Compare(str,"bar") != 0 {
+        return fmt.Errorf("Should have received 'bar' but instead received '%v'", str)
+    }
+    return nil
 }
