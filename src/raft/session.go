@@ -3,13 +3,20 @@ package raft
 import (
     "time"
     "errors"
+    "sync"
 )
+
+type syncedConn struct {
+    conn    *netConn
+    lock    sync.Mutex
+}
 
 type Session struct {
     trans               *NetworkTransport
-    conns               []*netConn
+    conns               []syncedConn
     // Leader is index into conns or raftServers arrays.
     leader              int
+    leaderLock          sync.RWMutex
     addrs               []ServerAddress
     // Client ID assigned by cluster for use in RIFL. 
     clientID            uint64
@@ -23,16 +30,21 @@ type Session struct {
 func CreateClientSession(trans *NetworkTransport, addrs []ServerAddress) (*Session, error) {
     session := &Session{
         trans: trans,
-        conns: make([]*netConn, len(addrs)),
+        conns: make([]syncedConn, len(addrs)),
         leader: -1,
         addrs: addrs,
         rpcSeqNo: 0,
     }
 
+    // Initialize syncedConn array.
+    for i := range session.conns {
+        session.conns[i] = syncedConn{}
+    }
+
     // Open connections to all raft servers.
     var err error
     for i, addr := range addrs {
-        session.conns[i], err = trans.getConn(addr)
+        session.conns[i].conn, err = trans.getConn(addr)
         if err == nil {
             session.leader = i
         }
@@ -99,37 +111,87 @@ func (s *Session) SendRequestWithSeqno(data []byte, keys []Key, resp *ClientResp
     return s.sendToActiveLeader(&req, resp, rpcClientRequest)
 }
 
-
-
 /* Close client session. TODO: GC client request tables. */
 func (s *Session) CloseClientSession() error {
     return nil
+}
+
+// TODO: send in parallel. If fail and haven't gotten a synced response from master, issue sync
+func (s *Session) sendToAllWitnesses(entry *Log, leader int) bool {
+    var err error
+    request := &RecordRequest {
+        Entry: entry,
+    }
+
+    // Send to all witnesses (excludes leader). 
+    for i := range s.conns {
+        if i == leader {
+            continue
+        }
+        s.conns[i].lock.Lock()
+        if s.conns[i].conn == nil {
+            s.conns[i].conn, err = s.trans.getConn(s.addrs[i])
+            if err != nil {
+                s.conns[i].lock.Unlock()
+                return false
+            }
+        }
+        err = sendRPC(s.conns[i].conn, rpcRecordRequest, request)
+        if err != nil {
+            s.conns[i].lock.Unlock()
+            return false
+        }
+        resp := &RecordResponse{}
+        _, err = decodeResponse(s.conns[i].conn, resp)
+        s.conns[i].lock.Unlock()
+        if err != nil || !resp.Success {
+            return false
+        }
+    }
+    s.leaderLock.Lock()
+    defer s.leaderLock.Unlock()
+    if s.leader == leader {
+        return true
+    } else {
+        // Active leader changed while sending to witness. Not sent
+        // to f+1 distinct replicas.
+        return false
+    }
 }
 
 func (s *Session) sendToActiveLeader(request interface{}, response GenericClientResponse, rpcType uint8) error {
     sendFailures := 0
     var err error
 
+    s.leaderLock.Lock()
+    defer s.leaderLock.Unlock()
+
     // Continue trying to send until have tried contacting all servers.
     for sendFailures < len(s.addrs) {
         // If no open connection to guessed leader, try to open one.
-        if s.conns[s.leader] == nil {
-            s.conns[s.leader], err = s.trans.getConn(s.addrs[s.leader])
+        s.conns[s.leader].lock.Lock()
+        if s.conns[s.leader].conn == nil {
+            s.conns[s.leader].conn, err = s.trans.getConn(s.addrs[s.leader])
             if err != nil {
+                s.conns[s.leader].lock.Unlock()
+                sendFailures += 1
+                s.leader = (s.leader + 1) % len(s.conns)
                 continue
             }
         }
-        err = sendRPC(s.conns[s.leader], rpcType, request)
+        err = sendRPC(s.conns[s.leader].conn, rpcType, request)
 
         // Failed to send RPC - try next server.
         if err != nil {
+            s.conns[s.leader].lock.Unlock()
             sendFailures += 1
             s.leader = (s.leader + 1) % len(s.conns)
             continue
         }
 
         // Try to decode response.
-        _, err = decodeResponse(s.conns[s.leader], &response)
+        _, err = decodeResponse(s.conns[s.leader].conn, &response)
+        s.conns[s.leader].lock.Unlock()
 
         // If failure, use leader hint or wait for election to complete.
         if err != nil {
