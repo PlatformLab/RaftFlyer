@@ -150,6 +150,62 @@ func (r *InstallSnapshotResponse) GetRPCHeader() RPCHeader {
 	return r.RPCHeader
 }
 
+// Record RPCs are used to store commutative operations at witnesses.
+// Accepted if commutative with other operations at witness, rejected
+// otherwise.
+type RecordRequest struct {
+	RPCHeader
+
+	// Entry to commit
+	Entry *Log
+}
+
+// See WithRPCHeader.
+func (r *RecordRequest) GetRPCHeader() RPCHeader {
+	return r.RPCHeader
+}
+
+// Record RPCs are used to store commutative operations at witnesses.
+// Accepted if commutative with other operations at witness, rejected
+// otherwise.
+type RecordResponse struct {
+	RPCHeader
+
+	// True if operation recorded at witness, false otherwise.
+	Success bool
+}
+
+// See WithRPCHeader.
+func (r *RecordResponse) GetRPCHeader() RPCHeader {
+	return r.RPCHeader
+}
+
+// Issued by a client to the master when a client cannot record an
+// operation in all witnesses.
+type SyncRequest struct {
+	RPCHeader
+}
+
+// See WithRPCHeader.
+func (r *SyncRequest) GetRPCHeader() RPCHeader {
+	return r.RPCHeader
+}
+
+// Sent when the master has completed the sync.
+type SyncResponse struct {
+	RPCHeader
+
+	// True if successfully synced at master..
+	Success bool
+    LeaderAddress ServerAddress
+}
+
+// See WithRPCHeader.
+func (r *SyncResponse) GetRPCHeader() RPCHeader {
+	return r.RPCHeader
+}
+
+
 type GenericClientResponse interface {
     GetLeaderAddress() ServerAddress
 }
