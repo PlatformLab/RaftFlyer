@@ -56,6 +56,9 @@ type Log struct {
 
     // Sequence number of command. Only used for LogCommand.
     SeqNo uint64
+
+    // Keys associated with RPC, used to check for commutativity.
+    Keys [][]byte
 }
 
 // LogStore is used to provide an interface for storing

@@ -45,7 +45,7 @@ func CreateClientSession(trans *NetworkTransport, addrs []ServerAddress) (*Sessi
 
 
 /* Make request to open session. */
-func (s *Session) SendRequest(data []byte, resp *ClientResponse) error {
+func (s *Session) SendRequest(data []byte, keys [][]byte, resp *ClientResponse) error {
     if resp == nil {
         return errors.New("Response is nil")
     }
@@ -56,6 +56,7 @@ func (s *Session) SendRequest(data []byte, resp *ClientResponse) error {
         Entry: &Log {
             Type: LogCommand,
             Data: data,
+            Keys: keys,
         },
         ClientID: s.clientID,
         SeqNo: s.rpcSeqNo,
@@ -65,7 +66,7 @@ func (s *Session) SendRequest(data []byte, resp *ClientResponse) error {
 }
 
 /* Make request to open session. Only use for testing purposes! */
-func (s *Session) SendRequestWithSeqno(data []byte, resp *ClientResponse, seqno uint64) error {
+func (s *Session) SendRequestWithSeqno(data []byte, keys [][]byte, resp *ClientResponse, seqno uint64) error {
     if resp == nil {
         return errors.New("Response is nil")
     }
@@ -76,6 +77,7 @@ func (s *Session) SendRequestWithSeqno(data []byte, resp *ClientResponse, seqno 
         Entry: &Log {
             Type: LogCommand,
             Data: data,
+            Keys: keys,
         },
         ClientID: s.clientID,
         SeqNo: seqno,
