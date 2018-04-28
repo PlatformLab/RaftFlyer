@@ -58,8 +58,10 @@ type Log struct {
     SeqNo uint64
 
     // Keys associated with RPC, used to check for commutativity.
-    Keys [][]byte
+    Keys []Key
 }
+
+type Key []byte
 
 // LogStore is used to provide an interface for storing
 // and retrieving logs in a durable fashion.

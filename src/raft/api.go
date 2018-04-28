@@ -170,6 +170,9 @@ type Raft struct {
 	// is indexed by an artificial ID which is used for deregistration.
 	observersLock sync.RWMutex
 	observers     map[uint64]*Observer
+
+    // State required to maintain witnesses.
+    witnessState    witnessState
 }
 
 // BootstrapCluster initializes a server's storage with the given cluster

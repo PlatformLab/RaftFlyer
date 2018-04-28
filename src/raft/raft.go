@@ -85,6 +85,20 @@ type leaderState struct {
 	stepDown   chan struct{}
 }
 
+// Tuple used to uniquely identify RPC using RIFL.
+type ClientSeqNo struct {
+    // Identifies unique client.
+    ClientID    uint64
+    // Identifies unique RPC from a client.
+    SeqNo       uint64
+}
+
+// witnessState is state for maintaining records as a witness.
+type witnessState struct {
+    keys    map[*Key]bool
+    records map[*ClientSeqNo]*Log
+}
+
 // setLeader is used to modify the current leader of the cluster
 func (r *Raft) setLeader(leader ServerAddress) {
 	r.leaderLock.Lock()
@@ -962,6 +976,10 @@ func (r *Raft) processRPC(rpc RPC) {
 		r.requestVote(rpc, cmd)
 	case *InstallSnapshotRequest:
 		r.installSnapshot(rpc, cmd)
+    case *RecordRequest:
+        r.recordRequest(rpc, cmd)
+    case *SyncRequest:
+        r.syncRequest(rpc, cmd)
     case *ClientRequest:
         r.clientRequest(rpc, cmd)
     case *ClientIdRequest:
@@ -1388,6 +1406,49 @@ func (r *Raft) clientIdRequest(rpc RPC, c *ClientIdRequest) {
     } else {
         rpc.Respond(resp, ErrNotLeader)
     }
+}
+
+func (r *Raft) syncRequest(rpc RPC, sync *SyncRequest) {
+
+}
+
+func (r *Raft) recordRequest(rpc RPC, record *RecordRequest) {
+    // Master can't act as a witness.
+    if r.getState() == Leader {
+        resp := &RecordResponse {
+            Success: false,
+        }
+        rpc.Respond(resp, nil)
+        return
+    }
+
+    // Check if operation involving key already stored at witness.
+    for _,key := range record.Entry.Keys {
+        if _,ok := r.witnessState.keys[&key]; ok {
+            resp := &RecordResponse{
+                Success : false,
+            }
+            rpc.Respond(resp, nil)
+            return
+        }
+    }
+
+    // Add keys separately in case keys included multiple times by client.
+    for _,key := range record.Entry.Keys {
+        r.witnessState.keys[&key] = true
+    }
+    // Record RPC in witness.
+    clientSeqNo := &ClientSeqNo {
+        ClientID:   record.Entry.ClientID,
+        SeqNo:      record.Entry.SeqNo,
+    }
+    r.witnessState.records[clientSeqNo] = record.Entry
+
+    // Respond to client.
+    resp := &RecordResponse {
+        Success: true,
+    }
+    rpc.Respond(resp, nil)
 }
 
 // Handle a clientRequest RPC from client.
