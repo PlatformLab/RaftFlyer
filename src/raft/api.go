@@ -53,6 +53,24 @@ var (
     // ErrBadClientId is returned when a client issues a RPC with a client
     // ID the cluster doesn't recognize.
     ErrBadClientId = errors.New("bad client ID used")
+
+    // ErrNotCommutative is returned when a client tries to push an operation
+    // to a witness that is not commutative with other operations stored at
+    // the witness.
+    ErrNotCommutative = errors.New("operation not commutative with operations in witness")
+
+    // ErrNotWitness is returned when a client contacts a leader instead of
+    // a witness.
+    ErrNotWitness = errors.New("contacted leader instead of witness")
+
+    // ErrNoActiveServers is returned when a client tries to contact a cluster
+    // and cannot reach any servers.
+    ErrNoActiveServers = errors.New("no active raft servers found")
+
+
+    // ErrNoActiveLeader is returned when a client tries to contact a leader
+    // and cannot reach an active leader.
+    ErrNoActiveLeader = errors.New("no active leader found")
 )
 
 // Raft implements a Raft node.

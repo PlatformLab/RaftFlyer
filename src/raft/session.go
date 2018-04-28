@@ -7,8 +7,10 @@ import (
 
 type Session struct {
     trans               *NetworkTransport
-    currConn            *netConn
-    raftServers         []ServerAddress
+    conns               []*netConn
+    // Leader is index into conns or raftServers arrays.
+    leader              int
+    addrs               []ServerAddress
     // Client ID assigned by cluster for use in RIFL. 
     clientID            uint64
     // Sequence number of next RPC for use in RIFL.
@@ -21,14 +23,27 @@ type Session struct {
 func CreateClientSession(trans *NetworkTransport, addrs []ServerAddress) (*Session, error) {
     session := &Session{
         trans: trans,
-        raftServers: addrs,
+        conns: make([]*netConn, len(addrs)),
+        leader: -1,
+        addrs: addrs,
         rpcSeqNo: 0,
     }
+
+    // Open connections to all raft servers.
     var err error
-    session.currConn, err = findActiveServerWithTrans(addrs, trans)
-    if err != nil {
-        return nil ,err
+    for i, addr := range addrs {
+        session.conns[i], err = trans.getConn(addr)
+        if err == nil {
+            session.leader = i
+        }
     }
+
+    // Report error if can't connect to any server.
+    if session.leader == -1 {
+        return nil, ErrNoActiveServers
+    }
+
+    // Get a client ID from the leader.
     req := ClientIdRequest{
         RPCHeader: RPCHeader {
             ProtocolVersion: ProtocolVersionMax,
@@ -42,7 +57,6 @@ func CreateClientSession(trans *NetworkTransport, addrs []ServerAddress) (*Sessi
     session.clientID = resp.ClientID
     return session, nil
 }
-
 
 /* Make request to open session. */
 func (s *Session) SendRequest(data []byte, keys []Key, resp *ClientResponse) error {
@@ -93,47 +107,50 @@ func (s *Session) CloseClientSession() error {
 }
 
 func (s *Session) sendToActiveLeader(request interface{}, response GenericClientResponse, rpcType uint8) error {
-    var err error = errors.New("")
-    retries := 5
-    /* Send heartbeat to active leader. Connect to active leader if connection no longer to active leader. */
-    for err != nil {
-        if retries <= 0 {
-            return errors.New("Failed to find active leader.")
-        }
-        if s.currConn == nil {
-            return errors.New("No current connection.")
-        }
-        err = sendRPC(s.currConn, rpcType, request)
-        /* Try another server if server went down. */
-        for err != nil {
-            if retries <= 0 {
-                return errors.New("Failed to find active leader.")
+    sendFailures := 0
+    var err error
+
+    // Continue trying to send until have tried contacting all servers.
+    for sendFailures < len(s.addrs) {
+        // If no open connection to guessed leader, try to open one.
+        if s.conns[s.leader] == nil {
+            s.conns[s.leader], err = s.trans.getConn(s.addrs[s.leader])
+            if err != nil {
+                continue
             }
-            s.currConn, err = findActiveServerWithTrans(s.raftServers, s.trans)
-            if err != nil || s.currConn == nil {
-                return errors.New("No active server found.")
-            }
-            retries--
-            err = sendRPC(s.currConn, rpcType, request)
         }
-        /* Decode response if necesary. Try new server to find leader if necessary. */
-        if (s.currConn == nil) {
-            return errors.New("Failed to find active leader.")
+        err = sendRPC(s.conns[s.leader], rpcType, request)
+
+        // Failed to send RPC - try next server.
+        if err != nil {
+            sendFailures += 1
+            s.leader = (s.leader + 1) % len(s.conns)
+            continue
         }
-        _, err = decodeResponse(s.currConn, &response)
+
+        // Try to decode response.
+        _, err = decodeResponse(s.conns[s.leader], &response)
+
+        // If failure, use leader hint or wait for election to complete.
         if err != nil {
             if response != nil && response.GetLeaderAddress() != "" {
-                s.currConn, _ = s.trans.getConn(response.GetLeaderAddress())
-             } else {
-                /* Wait for leader to be elected. */
-                time.Sleep(1000*time.Millisecond)
+                s.leader = (s.leader + 1) % len(s.conns)
+                for i, addr := range s.addrs {
+                    if addr == response.GetLeaderAddress() {
+                        s.leader = i
+                        break
+                    }
+                }
+            } else {
+                time.Sleep(100*time.Millisecond)
             }
+        } else {
+            return nil
         }
-        retries--
     }
-    return nil
-}
 
+    return ErrNoActiveLeader
+}
 
 func findActiveServerWithTrans(addrs []ServerAddress, trans *NetworkTransport) (*netConn, error) {
     for _, addr := range(addrs) {

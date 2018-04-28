@@ -9,6 +9,7 @@ import (
 	"time"
     "encoding/json"
 	"github.com/armon/go-metrics"
+    "sync"
 )
 
 const (
@@ -97,6 +98,7 @@ type ClientSeqNo struct {
 type witnessState struct {
     keys    map[*Key]bool
     records map[*ClientSeqNo]*Log
+    lock    sync.RWMutex
 }
 
 // setLeader is used to modify the current leader of the cluster
@@ -934,6 +936,15 @@ func (r *Raft) processLog(l *Log, future *logFuture) {
 			}
 		}
 
+        // Garbage collect at witnesses. 
+        clientSeqNo := &ClientSeqNo {
+            ClientID: l.ClientID,
+            SeqNo: l.SeqNo,
+        }    
+        r.witnessState.lock.Lock()
+        delete(r.witnessState.records, clientSeqNo)
+        r.witnessState.lock.Unlock()
+
 		// Return so that the future is only responded to
 		// by the FSM handler when the application is done
 		return
@@ -1418,9 +1429,12 @@ func (r *Raft) recordRequest(rpc RPC, record *RecordRequest) {
         resp := &RecordResponse {
             Success: false,
         }
-        rpc.Respond(resp, nil)
+        rpc.Respond(resp, ErrNotWitness)
         return
     }
+
+    r.witnessState.lock.Unlock()
+    defer r.witnessState.lock.Unlock()
 
     // Check if operation involving key already stored at witness.
     for _,key := range record.Entry.Keys {
@@ -1428,7 +1442,7 @@ func (r *Raft) recordRequest(rpc RPC, record *RecordRequest) {
             resp := &RecordResponse{
                 Success : false,
             }
-            rpc.Respond(resp, nil)
+            rpc.Respond(resp, ErrNotCommutative)
             return
         }
     }
