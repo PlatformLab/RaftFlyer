@@ -116,10 +116,53 @@ func (s *Session) CloseClientSession() error {
     return nil
 }
 
+func (s *Session) SendFastRequest(data []byte, keys []Key, resp *ClientResponse) {
+    entry := &Log {
+        Type: LogCommand,
+        Data: data,
+        Keys: keys,
+    }
+    req := ClientRequest {
+        RPCHeader: RPCHeader {
+            ProtocolVersion: ProtocolVersionMax,
+        },
+        Entry: entry,
+        ClientID: s.clientID,
+        SeqNo: s.rpcSeqNo,
+    }
+    s.rpcSeqNo++
+
+    resultCh := make(chan bool, len(s.addrs))
+    s.leaderLock.Lock()
+    leader := s.leader
+    s.leaderLock.Unlock()
+    go func(s *Session, req *ClientRequest, resp *ClientResponse, resultCh *chan bool) {
+        err := s.sendToActiveLeader(req, resp, rpcClientRequest)
+        if err != nil {
+            *resultCh <- false
+        } else {
+            *resultCh <- true
+        }
+    }(s, &req, resp, &resultCh)
+    s.sendToAllWitnesses(entry, leader, &resultCh)
+
+    success := true
+
+    for i := 0; i < len(s.addrs); i+=1 {
+        success = success && <-resultCh
+    }
+    s.leaderLock.Lock()
+    defer s.leaderLock.Unlock()
+    success = success && (s.leader == leader)
+    // Active leader changed while sending to witness. Not sent
+    // to f+1 distinct replicas.
+    // TODO: if not success, need to issue sync if not already synced
+
+}
+
 // TODO: send in parallel. If fail and haven't gotten a synced response from master, issue sync
-func (s *Session) sendToAllWitnesses(entry *Log, leader int) bool {
-    var err error
-    request := &RecordRequest {
+func (s *Session) sendToAllWitnesses(entry *Log, leader int, resultCh *chan bool) {
+    req := &RecordRequest {
         Entry: entry,
     }
 
@@ -128,35 +171,34 @@ func (s *Session) sendToAllWitnesses(entry *Log, leader int) bool {
         if i == leader {
             continue
         }
-        s.conns[i].lock.Lock()
-        if s.conns[i].conn == nil {
-            s.conns[i].conn, err = s.trans.getConn(s.addrs[i])
-            if err != nil {
-                s.conns[i].lock.Unlock()
-                return false
-            }
-        }
-        err = sendRPC(s.conns[i].conn, rpcRecordRequest, request)
+        go func(req *RecordRequest, resultCh *chan bool) {
+            *resultCh <- s.sendToWitness(i, req)
+        }(req, resultCh)
+    }
+}
+
+func (s * Session) sendToWitness(id int, req *RecordRequest) bool {
+    var err error
+    s.conns[id].lock.Lock()
+    if s.conns[id].conn == nil {
+        s.conns[id].conn, err = s.trans.getConn(s.addrs[id])
         if err != nil {
-            s.conns[i].lock.Unlock()
-            return false
-        }
-        resp := &RecordResponse{}
-        _, err = decodeResponse(s.conns[i].conn, resp)
-        s.conns[i].lock.Unlock()
-        if err != nil || !resp.Success {
+            s.conns[id].lock.Unlock()
             return false
         }
     }
-    s.leaderLock.Lock()
-    defer s.leaderLock.Unlock()
-    if s.leader == leader {
-        return true
-    } else {
-        // Active leader changed while sending to witness. Not sent
-        // to f+1 distinct replicas.
+    err = sendRPC(s.conns[id].conn, rpcRecordRequest, req)
+    if err != nil {
+        s.conns[id].lock.Unlock()
         return false
     }
+    resp := &RecordResponse{}
+    _, err = decodeResponse(s.conns[id].conn, resp)
+    s.conns[id].lock.Unlock()
+    if err != nil || !resp.Success {
+        return false
+    }
+    return true
 }
 
 func (s *Session) sendToActiveLeader(request interface{}, response GenericClientResponse, rpcType uint8) error {
