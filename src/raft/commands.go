@@ -191,6 +191,10 @@ func (r *SyncRequest) GetRPCHeader() RPCHeader {
 	return r.RPCHeader
 }
 
+type GenericClientResponse interface {
+    GetLeaderAddress() ServerAddress
+}
+
 // Sent when the master has completed the sync.
 type SyncResponse struct {
 	RPCHeader
@@ -205,9 +209,8 @@ func (r *SyncResponse) GetRPCHeader() RPCHeader {
 	return r.RPCHeader
 }
 
-
-type GenericClientResponse interface {
-    GetLeaderAddress() ServerAddress
+func (r *SyncResponse) GetLeaderAddress() ServerAddress {
+    return r.LeaderAddress
 }
 
 type ClientRequest struct {
@@ -232,6 +235,7 @@ type ClientResponse struct {
     Success bool
     LeaderAddress ServerAddress
     ResponseData  []byte 
+    Synced bool
 }
 
 // See WithRPCHeader.

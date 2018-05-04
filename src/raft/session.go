@@ -132,28 +132,40 @@ func (s *Session) SendFastRequest(data []byte, keys []Key, resp *ClientResponse)
     }
     s.rpcSeqNo++
 
-    resultCh := make(chan bool, len(s.addrs))
-    s.leaderLock.Lock()
-    leader := s.leader
-    s.leaderLock.Unlock()
-    go func(s *Session, req *ClientRequest, resp *ClientResponse, resultCh *chan bool) {
-        err := s.sendToActiveLeader(req, resp, rpcClientRequest)
-        if err != nil {
-            *resultCh <- false
-        } else {
-            *resultCh <- true
+    // Repeat until success.
+    for true {
+        resultCh := make(chan bool, len(s.addrs))
+        s.leaderLock.Lock()
+        leader := s.leader
+        s.leaderLock.Unlock()
+        go func(s *Session, req *ClientRequest, resp *ClientResponse, resultCh *chan bool) {
+            err := s.sendToActiveLeader(req, resp, rpcClientRequest)
+            if err != nil {
+                *resultCh <- false
+            } else {
+                *resultCh <- true
+            }
+        }(s, &req, resp, &resultCh)
+        s.sendToAllWitnesses(entry, leader, &resultCh)
+
+        success := true
+
+        for i := 0; i < len(s.addrs); i+=1 {
+            success = success && <-resultCh
+            // TODO: if synced, automatically succeed, otherwise if not success need to retry
         }
-    }(s, &req, resp, &resultCh)
-    s.sendToAllWitnesses(entry, leader, &resultCh)
-
-    success := true
-
-    for i := 0; i < len(s.addrs); i+=1 {
-        success = success && <-resultCh
+        if success || resp.Synced { return }
+        // If fail to record at witnesses and not synced, issue sync request.
+        sync := &SyncRequest {
+            RPCHeader: RPCHeader {
+                ProtocolVersion: ProtocolVersionMax,
+            },
+        }
+        var syncResp *SyncResponse
+        err := s.sendToActiveLeader(sync, syncResp, rpcSyncRequest)
+        if err == nil && syncResp.Success { return }
+        // Failed to sync. Try everything again
     }
-    s.leaderLock.Lock()
-    defer s.leaderLock.Unlock()
-    success = success && (s.leader == leader)
     // Active leader changed while sending to witness. Not sent
     // to f+1 distinct replicas.
     // TODO: if not success, need to issue sync if not already synced
