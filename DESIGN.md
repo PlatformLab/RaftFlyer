@@ -1,15 +1,15 @@
-### CURP
+## CURP
 
-## Completed for CURP
+### Completed for CURP
 * Record and sync RPCs
 * Keys to track commutativity in client operations
 * Accept records only if don't conflict
 * GC records at witnesses when done applying
 * Send to witnesses in parallel
 
-### RIFL
+## RIFL
 
-## Completed for RIFL
+### Completed for RIFL
 * Added client IDs and sequence numbers to client RPCs
 * Assign client ID at master using global nextClientId
 * Replicate nextClientId counter to other servers with LogNextClientId operation
@@ -17,7 +17,7 @@
 * Check for duplicate before applying to state machine
 * Make nextClientId and cache of client responses persistent.
 
-## RIFL Code Base
+### RIFL Code Base
 * `raft.go`: Support for ClientId RPC handling, incrementing nextClientId at all replicas
 * `client_response_cache.go`: Stores state about the response to a client RPC along with a timestamp. Cache is periodically garbage collected.
 * `config.go`: Set interval at which to garbage collect cache and how long responses to client RPCs should remain cached
