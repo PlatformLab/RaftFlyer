@@ -1,10 +1,10 @@
 ## CURP
 
 ### Completed for CURP
-* Record and sync RPCs
-* Keys to track commutativity in client operations
+* Record and sync RPCs.
+* Keys sent with client requests to track commutativity in client operations.
 * Accept records only if operations stored in witnesses don't commute.
-* GC records at witnesses when done applying
+* GC records at witnesses when done applying.
 * Send to witnesses and master in parallel, check for success or sync. If failure, send sync to master.
 
 ### CURP Code Base
