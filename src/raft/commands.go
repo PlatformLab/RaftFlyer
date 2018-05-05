@@ -217,11 +217,7 @@ type ClientRequest struct {
     RPCHeader
 
     // New entry to commit. 
-    Entry *Log
-    // ID of client, for use in RIFL.
-    ClientID    uint64
-    // Sequence number of RPC, for use in RIFL.
-    SeqNo       uint64
+    Entry       *Log
 }
 
 // See WithRPCHeader.

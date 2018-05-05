@@ -1433,36 +1433,42 @@ func (r *Raft) recordRequest(rpc RPC, record *RecordRequest) {
         return
     }
 
+    success := r.storeIfCommutative(record.Entry)
+    // Respond to client.
+    resp := &RecordResponse {
+        Success: success,
+    }
+
+    if success {
+        rpc.Respond(resp, nil)
+    } else {
+        rpc.Respond(resp, ErrNotCommutative)
+    }
+}
+
+func (r *Raft) storeIfCommutative(log *Log) bool {
     r.witnessState.lock.Unlock()
     defer r.witnessState.lock.Unlock()
 
     // Check if operation involving key already stored at witness.
-    for _,key := range record.Entry.Keys {
+    for _,key := range log.Keys {
         if _,ok := r.witnessState.keys[&key]; ok {
-            resp := &RecordResponse{
-                Success : false,
-            }
-            rpc.Respond(resp, ErrNotCommutative)
-            return
+            return false
         }
     }
 
     // Add keys separately in case keys included multiple times by client.
-    for _,key := range record.Entry.Keys {
+    for _,key := range log.Keys {
         r.witnessState.keys[&key] = true
     }
     // Record RPC in witness.
     clientSeqNo := &ClientSeqNo {
-        ClientID:   record.Entry.ClientID,
-        SeqNo:      record.Entry.SeqNo,
+        ClientID:   log.ClientID,
+        SeqNo:      log.SeqNo,
     }
-    r.witnessState.records[clientSeqNo] = record.Entry
+    r.witnessState.records[clientSeqNo] = log 
 
-    // Respond to client.
-    resp := &RecordResponse {
-        Success: true,
-    }
-    rpc.Respond(resp, nil)
+    return true
 }
 
 // Handle a clientRequest RPC from client.
@@ -1474,7 +1480,7 @@ func (r *Raft) clientRequest(rpc RPC, c *ClientRequest) {
     }
     // Check if client ID is valid.
     r.clientResponseLock.RLock()
-    _, ok := r.clientResponseCache[c.ClientID]
+    _, ok := r.clientResponseCache[c.Entry.ClientID]
     r.clientResponseLock.RUnlock()
     if !ok {
         rpc.Respond(resp, ErrBadClientId)
@@ -1486,7 +1492,7 @@ func (r *Raft) clientRequest(rpc RPC, c *ClientRequest) {
         // Apply all commands in client request.
         go func(r *Raft, resp *ClientResponse, rpc RPC, c *ClientRequest) {
             var rpcErr error
-            r.applyCommand(c.Entry.Data, c.ClientID, c.SeqNo, resp, &rpcErr)
+            r.applyCommand(c.Entry, resp, &rpcErr)
             rpc.Respond(resp, rpcErr)
         }(r, resp, rpc, c)
     } else {
@@ -1495,9 +1501,19 @@ func (r *Raft) clientRequest(rpc RPC, c *ClientRequest) {
     }
 }
 
+func (r *Raft) applyFastCommand(log *Log, resp *ClientResponse, rpcErr *error) {
+    commutative := r.storeIfCommutative(log)
+    if commutative {
+        // TODO: Apply locally and respond
+    } else {
+        // Sync all previous requests and execute this request synchronously.
+        r.applyCommand(log, resp, rpcErr)
+    }
+}
+
 // Apply a command from leader to all raft FSMs. */
-func (r *Raft) applyCommand(command []byte, clientId uint64, seqNo uint64, resp *ClientResponse, rpcErr *error) {
-    f := r.Apply(command, clientId, seqNo, 0)
+func (r *Raft) applyCommand(log *Log, resp *ClientResponse, rpcErr *error) {
+    f := r.Apply(log, 0)
     if f.Error() != nil {
         r.logger.Printf("err: %v",f.Error())
         *rpcErr = f.Error()
@@ -1506,6 +1522,7 @@ func (r *Raft) applyCommand(command []byte, clientId uint64, seqNo uint64, resp 
     data, _:= json.Marshal(f.Response())
     resp.ResponseData = data
     resp.Success = true
+    resp.Synced = true // TODO: sync at master if needed
 }
 
 // setLastContact is used to set the last contact time to now

@@ -82,10 +82,10 @@ func (s *Session) SendRequest(data []byte, keys []Key, resp *ClientResponse) err
         Entry: &Log {
             Type: LogCommand,
             Data: data,
+            ClientID: s.clientID,
+            SeqNo: s.rpcSeqNo,
             Keys: keys,
         },
-        ClientID: s.clientID,
-        SeqNo: s.rpcSeqNo,
     }
     s.rpcSeqNo++
     return s.sendToActiveLeader(&req, resp, rpcClientRequest)
@@ -104,9 +104,9 @@ func (s *Session) SendRequestWithSeqno(data []byte, keys []Key, resp *ClientResp
             Type: LogCommand,
             Data: data,
             Keys: keys,
+            ClientID: s.clientID,
+            SeqNo: seqno,
         },
-        ClientID: s.clientID,
-        SeqNo: seqno,
     }
     return s.sendToActiveLeader(&req, resp, rpcClientRequest)
 }
@@ -117,18 +117,17 @@ func (s *Session) CloseClientSession() error {
 }
 
 func (s *Session) SendFastRequest(data []byte, keys []Key, resp *ClientResponse) {
-    entry := &Log {
-        Type: LogCommand,
-        Data: data,
-        Keys: keys,
-    }
     req := ClientRequest {
         RPCHeader: RPCHeader {
             ProtocolVersion: ProtocolVersionMax,
         },
-        Entry: entry,
-        ClientID: s.clientID,
-        SeqNo: s.rpcSeqNo,
+        Entry: &Log {
+            Type: LogCommand,
+            Data: data,
+            Keys: keys,
+            ClientID: s.clientID,
+            SeqNo: s.rpcSeqNo,
+        },
     }
     s.rpcSeqNo++
 
@@ -146,7 +145,7 @@ func (s *Session) SendFastRequest(data []byte, keys []Key, resp *ClientResponse)
                 *resultCh <- true
             }
         }(s, &req, resp, &resultCh)
-        s.sendToAllWitnesses(entry, leader, &resultCh)
+        s.sendToAllWitnesses(req.Entry, leader, &resultCh)
 
         success := true
 
@@ -154,6 +153,11 @@ func (s *Session) SendFastRequest(data []byte, keys []Key, resp *ClientResponse)
             success = success && <-resultCh
             // TODO: if synced, automatically succeed, otherwise if not success need to retry
         }
+        s.leaderLock.Lock()
+        stillLeader := leader == s.leader
+        s.leaderLock.Unlock()
+        if !stillLeader { continue }    // Active leader changed while sending to witness. 
+                                        // Not sent to f+1 distinct replicas.
         if success || resp.Synced { return }
         // If fail to record at witnesses and not synced, issue sync request.
         sync := &SyncRequest {
@@ -166,9 +170,6 @@ func (s *Session) SendFastRequest(data []byte, keys []Key, resp *ClientResponse)
         if err == nil && syncResp.Success { return }
         // Failed to sync. Try everything again
     }
-    // Active leader changed while sending to witness. Not sent
-    // to f+1 distinct replicas.
-    // TODO: if not success, need to issue sync if not already synced
 
 }
 

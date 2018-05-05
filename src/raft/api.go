@@ -661,7 +661,7 @@ func (r *Raft) Leader() ServerAddress {
 // An optional timeout can be provided to limit the amount of time we wait
 // for the command to be started. This must be run on the leader or it
 // will fail.
-func (r *Raft) Apply(cmd []byte, clientId uint64, seqNo uint64, timeout time.Duration) ApplyFuture {
+func (r *Raft) Apply(log *Log, timeout time.Duration) ApplyFuture {
 	metrics.IncrCounter([]string{"raft", "apply"}, 1)
 	var timer <-chan time.Time
 	if timeout > 0 {
@@ -670,12 +670,7 @@ func (r *Raft) Apply(cmd []byte, clientId uint64, seqNo uint64, timeout time.Dur
 
 	// Create a log future, no index or term yet
 	logFuture := &logFuture{
-		log: Log{
-			Type: LogCommand,
-            ClientID: clientId,
-            SeqNo: seqNo,
-			Data: cmd,
-		},
+		log: *log,
 	}
 	logFuture.init()
 
