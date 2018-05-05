@@ -52,34 +52,16 @@ func (r *Raft) runFSM() {
 	commit := func(req *commitTuple) {
 		// Apply the log if a command
         var resp interface{}
-		if req.log.Type == LogCommand {
-            r.clientResponseLock.Lock()
-            clientCache, clientIdKnown := r.clientResponseCache[req.log.ClientID]
-            if !clientIdKnown {
-                r.clientResponseCache[req.log.ClientID] = make(map[uint64]clientResponseEntry)
-                clientCache = r.clientResponseCache[req.log.ClientID]
-            }
-            cachedResp, duplicateReq := clientCache[req.log.SeqNo]
-            if duplicateReq {
-                r.logger.Printf("found cached response for client %v with seqno %v with resp %v", req.log.ClientID, req.log.SeqNo, cachedResp.response)
-                resp = cachedResp.response
-            } else {
-			    start := time.Now()
-                resp = r.fsm.Apply(req.log)
-                metrics.MeasureSince([]string{"raft", "fsm", "apply"}, start)
-                // Add response to clientResponseCache.
-                clientCache[req.log.SeqNo] = clientResponseEntry {
-                    response:   resp,
-                    timestamp:  time.Now(),
-                }
-                r.clientResponseCache[req.log.ClientID] = clientCache
-            }
-            r.clientResponseLock.Unlock()
+        if req.log.Type == LogCommand {
+            r.applyCommandLocally(req.log, &resp)
         }
 
 		// Update the indexes
-		lastIndex = req.log.Index
-		lastTerm = req.log.Term
+        // Need to take max because could have gotten stale client request that is replayed.
+         if req.log.Index > lastIndex || req.log.Term > lastTerm {
+            lastIndex = req.log.Index
+            lastTerm = req.log.Term
+        }
 
 		// Invoke the future if given
 		if req.future != nil {
@@ -152,4 +134,29 @@ func (r *Raft) runFSM() {
 			return
 		}
 	}
+}
+
+func (r *Raft) applyCommandLocally(log *Log, resp *interface{}) {
+    r.clientResponseLock.Lock()
+    clientCache, clientIdKnown := r.clientResponseCache[log.ClientID]
+    if !clientIdKnown {
+        r.clientResponseCache[log.ClientID] = make(map[uint64]clientResponseEntry)
+        clientCache = r.clientResponseCache[log.ClientID]
+    }
+    cachedResp, duplicateReq := clientCache[log.SeqNo]
+    if duplicateReq {
+        r.logger.Printf("found cached response for client %v with seqno %v with resp %v", log.ClientID, log.SeqNo, cachedResp.response)
+        *resp = cachedResp.response
+    } else {
+        start := time.Now()
+        *resp = r.fsm.Apply(log)
+        metrics.MeasureSince([]string{"raft", "fsm", "apply"}, start)
+        // Add response to clientResponseCache.
+        clientCache[log.SeqNo] = clientResponseEntry {
+            response:   *resp,
+            timestamp:  time.Now(),
+        }
+        r.clientResponseCache[log.ClientID] = clientCache
+    }
+    r.clientResponseLock.Unlock()
 }

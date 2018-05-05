@@ -1504,7 +1504,13 @@ func (r *Raft) clientRequest(rpc RPC, c *ClientRequest) {
 func (r *Raft) applyFastCommand(log *Log, resp *ClientResponse, rpcErr *error) {
     commutative := r.storeIfCommutative(log)
     if commutative {
-        // TODO: Apply locally and respond
+        // Apply locally and respond
+        var response interface{}
+        r.applyCommandLocally(log, &response)
+        data, _ := json.Marshal(response)
+        resp.ResponseData = data
+        resp.Success = true
+        resp.Synced = false
     } else {
         // Sync all previous requests and execute this request synchronously.
         r.applyCommand(log, resp, rpcErr)
