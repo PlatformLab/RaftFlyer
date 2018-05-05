@@ -62,7 +62,7 @@ func (c *Client) IncWithSeqno(seqno uint64) (uint64, error) {
     }
     resp := raft.ClientResponse{}
     keys := []raft.Key{raft.Key([]byte{1})}
-    sendErr := c.session.SendRequestWithSeqno(data, keys, &resp, seqno)
+    sendErr := c.session.SendRequestWithSeqNo(data, keys, &resp, seqno)
     if sendErr != nil {
         return 0, sendErr
     }

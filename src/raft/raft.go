@@ -1420,7 +1420,7 @@ func (r *Raft) clientIdRequest(rpc RPC, c *ClientIdRequest) {
 }
 
 func (r *Raft) syncRequest(rpc RPC, sync *SyncRequest) {
-
+    r.logger.Printf("Tried to sync, not implemented yet")
 }
 
 func (r *Raft) recordRequest(rpc RPC, record *RecordRequest) {
@@ -1490,11 +1490,11 @@ func (r *Raft) clientRequest(rpc RPC, c *ClientRequest) {
     // Have we contacted the leader?
     if (r.getState() == Leader) {
         // Apply all commands in client request.
-        go func(r *Raft, resp *ClientResponse, rpc RPC, c *ClientRequest) {
+        r.goFunc(func() {
             var rpcErr error
             r.applyCommand(c.Entry, resp, &rpcErr)
             rpc.Respond(resp, rpcErr)
-        }(r, resp, rpc, c)
+        })
     } else {
         resp.Success = false
         rpc.Respond(resp, ErrNotLeader)
@@ -1504,13 +1504,15 @@ func (r *Raft) clientRequest(rpc RPC, c *ClientRequest) {
 func (r *Raft) applyFastCommand(log *Log, resp *ClientResponse, rpcErr *error) {
     commutative := r.storeIfCommutative(log)
     if commutative {
-        // Apply locally and respond
+        // Apply locally, store in witness cache, and respond
         var response interface{}
         r.applyCommandLocally(log, &response)
         data, _ := json.Marshal(response)
         resp.ResponseData = data
         resp.Success = true
         resp.Synced = false
+        // Replicate to client asynchronously
+        r.goFunc(func() { r.Apply(log, 0) })
     } else {
         // Sync all previous requests and execute this request synchronously.
         r.applyCommand(log, resp, rpcErr)

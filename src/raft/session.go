@@ -72,27 +72,13 @@ func CreateClientSession(trans *NetworkTransport, addrs []ServerAddress) (*Sessi
 
 /* Make request to open session. */
 func (s *Session) SendRequest(data []byte, keys []Key, resp *ClientResponse) error {
-    if resp == nil {
-        return errors.New("Response is nil")
-    }
-    req := ClientRequest {
-        RPCHeader: RPCHeader {
-            ProtocolVersion: ProtocolVersionMax,
-        },
-        Entry: &Log {
-            Type: LogCommand,
-            Data: data,
-            ClientID: s.clientID,
-            SeqNo: s.rpcSeqNo,
-            Keys: keys,
-        },
-    }
+    seqNo := s.rpcSeqNo
     s.rpcSeqNo++
-    return s.sendToActiveLeader(&req, resp, rpcClientRequest)
+    return s.SendRequestWithSeqNo(data, keys, resp, seqNo)
 }
 
 /* Make request to open session. Only use for testing purposes! */
-func (s *Session) SendRequestWithSeqno(data []byte, keys []Key, resp *ClientResponse, seqno uint64) error {
+func (s *Session) SendRequestWithSeqNo(data []byte, keys []Key, resp *ClientResponse, seqno uint64) error {
     if resp == nil {
         return errors.New("Response is nil")
     }
@@ -117,6 +103,12 @@ func (s *Session) CloseClientSession() error {
 }
 
 func (s *Session) SendFastRequest(data []byte, keys []Key, resp *ClientResponse) {
+    seqNo := s.rpcSeqNo
+    s.rpcSeqNo++
+    s.SendFastRequestWithSeqNo(data, keys, resp, seqNo)
+}
+
+func (s *Session) SendFastRequestWithSeqNo(data []byte, keys []Key, resp *ClientResponse, seqNo uint64) {
     req := ClientRequest {
         RPCHeader: RPCHeader {
             ProtocolVersion: ProtocolVersionMax,
@@ -126,12 +118,12 @@ func (s *Session) SendFastRequest(data []byte, keys []Key, resp *ClientResponse)
             Data: data,
             Keys: keys,
             ClientID: s.clientID,
-            SeqNo: s.rpcSeqNo,
+            SeqNo: seqNo,
         },
     }
-    s.rpcSeqNo++
 
     // Repeat until success.
+    // TODO: only retry limited number of times
     for true {
         resultCh := make(chan bool, len(s.addrs))
         s.leaderLock.Lock()
@@ -153,11 +145,6 @@ func (s *Session) SendFastRequest(data []byte, keys []Key, resp *ClientResponse)
             success = success && <-resultCh
             // TODO: if synced, automatically succeed, otherwise if not success need to retry
         }
-        s.leaderLock.Lock()
-        stillLeader := leader == s.leader
-        s.leaderLock.Unlock()
-        if !stillLeader { continue }    // Active leader changed while sending to witness. 
-                                        // Not sent to f+1 distinct replicas.
         if success || resp.Synced { return }
         // If fail to record at witnesses and not synced, issue sync request.
         sync := &SyncRequest {
