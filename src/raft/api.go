@@ -522,6 +522,10 @@ func NewRaft(conf *Config, fsm FSM, logs LogStore, stable StableStore, snaps Sna
 		configurationsCh:      make(chan *configurationsFuture, 8),
 		bootstrapCh:           make(chan *bootstrapFuture),
 		observers:             make(map[uint64]*Observer),
+        witnessState:          witnessState {
+                                    keys: make(map[*Key]bool),
+                                    records: make(map[*ClientSeqNo]*Log),
+                                },
     }
 
 	// Initialize as a follower.

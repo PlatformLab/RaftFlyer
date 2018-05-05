@@ -1434,6 +1434,7 @@ func (r *Raft) recordRequest(rpc RPC, record *RecordRequest) {
     }
 
     success := r.storeIfCommutative(record.Entry)
+    r.logger.Printf("witness says client req is commutative: %b", success)
     // Respond to client.
     resp := &RecordResponse {
         Success: success,
@@ -1447,7 +1448,7 @@ func (r *Raft) recordRequest(rpc RPC, record *RecordRequest) {
 }
 
 func (r *Raft) storeIfCommutative(log *Log) bool {
-    r.witnessState.lock.Unlock()
+    r.witnessState.lock.Lock()
     defer r.witnessState.lock.Unlock()
 
     // Check if operation involving key already stored at witness.
@@ -1492,7 +1493,7 @@ func (r *Raft) clientRequest(rpc RPC, c *ClientRequest) {
         // Apply all commands in client request.
         r.goFunc(func() {
             var rpcErr error
-            r.applyCommand(c.Entry, resp, &rpcErr)
+            r.applyFastCommand(c.Entry, resp, &rpcErr)
             rpc.Respond(resp, rpcErr)
         })
     } else {
@@ -1511,6 +1512,7 @@ func (r *Raft) applyFastCommand(log *Log, resp *ClientResponse, rpcErr *error) {
         resp.ResponseData = data
         resp.Success = true
         resp.Synced = false
+        resp.LeaderAddress = r.Leader()
         // Replicate to client asynchronously
         r.goFunc(func() { r.Apply(log, 0) })
     } else {
@@ -1530,7 +1532,8 @@ func (r *Raft) applyCommand(log *Log, resp *ClientResponse, rpcErr *error) {
     data, _:= json.Marshal(f.Response())
     resp.ResponseData = data
     resp.Success = true
-    resp.Synced = true // TODO: sync at master if needed
+    resp.Synced = true
+    resp.LeaderAddress = r.Leader()
 }
 
 // setLastContact is used to set the last contact time to now

@@ -126,23 +126,23 @@ func (s *Session) SendFastRequestWithSeqNo(data []byte, keys []Key, resp *Client
     // TODO: only retry limited number of times
     for true {
         resultCh := make(chan bool, len(s.addrs))
-        s.leaderLock.Lock()
-        leader := s.leader
-        s.leaderLock.Unlock()
         go func(s *Session, req *ClientRequest, resp *ClientResponse, resultCh *chan bool) {
             err := s.sendToActiveLeader(req, resp, rpcClientRequest)
+            //fmt.Println("err sending to leader: ", err)
             if err != nil {
                 *resultCh <- false
             } else {
                 *resultCh <- true
             }
         }(s, &req, resp, &resultCh)
-        s.sendToAllWitnesses(req.Entry, leader, &resultCh)
+        s.sendToAllWitnesses(req.Entry, &resultCh)
 
         success := true
 
-        for i := 0; i < len(s.addrs); i+=1 {
-            success = success && <-resultCh
+        for i := 0; i <= len(s.addrs); i+=1 {
+            result := <-resultCh
+            //fmt.Println("result is ", result)
+            success = success && result
             // TODO: if synced, automatically succeed, otherwise if not success need to retry
         }
         if success || resp.Synced { return }
@@ -160,17 +160,16 @@ func (s *Session) SendFastRequestWithSeqNo(data []byte, keys []Key, resp *Client
 
 }
 
-// TODO: send in parallel. If fail and haven't gotten a synced response from master, issue sync
-func (s *Session) sendToAllWitnesses(entry *Log, leader int, resultCh *chan bool) {
+func (s *Session) sendToAllWitnesses(entry *Log, resultCh *chan bool) {
     req := &RecordRequest {
+        RPCHeader: RPCHeader {
+            ProtocolVersion: ProtocolVersionMax,
+        },
         Entry: entry,
     }
 
     // Send to all witnesses (excludes leader). 
     for i := range s.conns {
-        if i == leader {
-            continue
-        }
         go func(req *RecordRequest, resultCh *chan bool) {
             *resultCh <- s.sendToWitness(i, req)
         }(req, resultCh)
@@ -187,6 +186,7 @@ func (s * Session) sendToWitness(id int, req *RecordRequest) bool {
             return false
         }
     }
+    //fmt.Println("send with id %d", id)
     err = sendRPC(s.conns[id].conn, rpcRecordRequest, req)
     if err != nil {
         s.conns[id].lock.Unlock()

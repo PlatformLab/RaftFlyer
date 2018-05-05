@@ -41,10 +41,7 @@ func (c *Client) Inc() (uint64, error) {
     }
     resp := raft.ClientResponse{}
     keys := []raft.Key{raft.Key([]byte{1})}
-    sendErr := c.session.SendRequest(data, keys, &resp)
-    if sendErr != nil {
-        return 0, sendErr
-    }
+    c.session.SendFastRequest(data, keys, &resp)
     var response IncResponse
     recvErr := json.Unmarshal(resp.ResponseData, &response)
     if recvErr != nil {
@@ -62,10 +59,7 @@ func (c *Client) IncWithSeqno(seqno uint64) (uint64, error) {
     }
     resp := raft.ClientResponse{}
     keys := []raft.Key{raft.Key([]byte{1})}
-    sendErr := c.session.SendRequestWithSeqNo(data, keys, &resp, seqno)
-    if sendErr != nil {
-        return 0, sendErr
-    }
+    c.session.SendFastRequestWithSeqNo(data, keys, &resp, seqno)
     var response IncResponse
     recvErr := json.Unmarshal(resp.ResponseData, &response)
     if recvErr != nil {
@@ -86,7 +80,8 @@ func (c *Client) Set(key string, value string) error {
         return marshal_err
     }
     keys := []raft.Key{raft.Key([]byte(key))}
-    return c.session.SendRequest(data, keys, &raft.ClientResponse{})
+    c.session.SendFastRequest(data, keys, &raft.ClientResponse{})
+    return nil
 }
 
 // Send RPC to get the value of a key. Empty string if error. 
@@ -100,10 +95,7 @@ func (c *Client) Get(key string) (string, error) {
     }
     resp := raft.ClientResponse{}
     keys := []raft.Key{raft.Key([]byte(key))}
-    sendErr := c.session.SendRequest(data, keys, &resp)
-    if sendErr != nil {
-        return "", sendErr
-    }
+    c.session.SendFastRequest(data, keys, &resp)
     var response GetResponse
     recvErr := json.Unmarshal(resp.ResponseData, &response)
     if recvErr != nil {
