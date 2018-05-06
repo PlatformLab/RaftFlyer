@@ -1421,6 +1421,32 @@ func (r *Raft) clientIdRequest(rpc RPC, c *ClientIdRequest) {
 
 func (r *Raft) syncRequest(rpc RPC, sync *SyncRequest) {
     r.logger.Printf("Tried to sync, not implemented yet")
+    leader := r.Leader()
+    resp := &SyncResponse{
+        Success : false,
+        LeaderAddress : leader,
+    }
+    // Check if client ID is valid.
+    r.clientResponseLock.RLock()
+    _, ok := r.clientResponseCache[sync.Entry.ClientID]
+    r.clientResponseLock.RUnlock()
+    if !ok {
+        rpc.Respond(resp, ErrBadClientId)
+        return
+    }
+    // Check if request has already been made.
+    // Have we contacted the leader?
+    if (r.getState() == Leader) {
+        // Apply all commands in client request.
+        r.goFunc(func() {
+            var rpcErr error
+            r.applySynchronousCommand(sync.Entry, resp, &rpcErr)
+            rpc.Respond(resp, rpcErr)
+        })
+    } else {
+        resp.Success = false
+        rpc.Respond(resp, ErrNotLeader)
+    }
 }
 
 func (r *Raft) recordRequest(rpc RPC, record *RecordRequest) {
@@ -1493,7 +1519,7 @@ func (r *Raft) clientRequest(rpc RPC, c *ClientRequest) {
         // Apply all commands in client request.
         r.goFunc(func() {
             var rpcErr error
-            r.applyFastCommand(c.Entry, resp, &rpcErr)
+            r.applyCommand(c.Entry, resp, &rpcErr)
             rpc.Respond(resp, rpcErr)
         })
     } else {
@@ -1502,38 +1528,39 @@ func (r *Raft) clientRequest(rpc RPC, c *ClientRequest) {
     }
 }
 
-func (r *Raft) applyFastCommand(log *Log, resp *ClientResponse, rpcErr *error) {
+func (r *Raft) applyCommand(log *Log, resp *ClientResponse, rpcErr *error) {
     commutative := r.storeIfCommutative(log)
     if commutative {
         // Apply locally, store in witness cache, and respond
-        var response interface{}
-        r.applyCommandLocally(log, &response)
-        data, _ := json.Marshal(response)
-        resp.ResponseData = data
-        resp.Success = true
+        r.applyCommutativeCommand(log, resp, rpcErr)
         resp.Synced = false
-        resp.LeaderAddress = r.Leader()
-        // Replicate to client asynchronously
-        r.goFunc(func() { r.Apply(log, 0) })
     } else {
         // Sync all previous requests and execute this request synchronously.
-        r.applyCommand(log, resp, rpcErr)
+        r.applySynchronousCommand(log, resp, rpcErr)
+        resp.Synced = true
     }
 }
 
+// TODO: missing error handling here?
+func (r *Raft) applyCommutativeCommand(log *Log, resp ClientOperationResponse, rpcErr *error) {
+    // Apply locally, store in witness cache, and respond
+    var response interface{}
+    r.applyCommandLocally(log, &response)
+    data, _ := json.Marshal(response)
+    resp.ConstructResponse(data, true, r.Leader())
+    // Replicate to client asynchronously
+    r.goFunc(func() { r.Apply(log, 0) })
+}
+
 // Apply a command from leader to all raft FSMs. */
-func (r *Raft) applyCommand(log *Log, resp *ClientResponse, rpcErr *error) {
+func (r *Raft) applySynchronousCommand(log *Log, resp ClientOperationResponse, rpcErr *error) {
     f := r.Apply(log, 0)
     if f.Error() != nil {
         r.logger.Printf("err: %v",f.Error())
         *rpcErr = f.Error()
-        resp.Success = false
     }
     data, _:= json.Marshal(f.Response())
-    resp.ResponseData = data
-    resp.Success = true
-    resp.Synced = true
-    resp.LeaderAddress = r.Leader()
+    resp.ConstructResponse(data, true, r.Leader())
 }
 
 // setLastContact is used to set the last contact time to now

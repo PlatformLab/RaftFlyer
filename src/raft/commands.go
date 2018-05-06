@@ -184,6 +184,8 @@ func (r *RecordResponse) GetRPCHeader() RPCHeader {
 // operation in all witnesses.
 type SyncRequest struct {
 	RPCHeader
+
+    Entry *Log
 }
 
 // See WithRPCHeader.
@@ -195,13 +197,18 @@ type GenericClientResponse interface {
     GetLeaderAddress() ServerAddress
 }
 
+type ClientOperationResponse interface {
+    ConstructResponse([]byte, bool, ServerAddress)
+}
+
 // Sent when the master has completed the sync.
 type SyncResponse struct {
 	RPCHeader
 
-	// True if successfully synced at master..
+	// True if successfully synced at master.
 	Success bool
     LeaderAddress ServerAddress
+    ResponseData    []byte
 }
 
 // See WithRPCHeader.
@@ -211,6 +218,12 @@ func (r *SyncResponse) GetRPCHeader() RPCHeader {
 
 func (r *SyncResponse) GetLeaderAddress() ServerAddress {
     return r.LeaderAddress
+}
+
+func (r *SyncResponse) ConstructResponse(data []byte, success bool, leaderAddr ServerAddress) {
+    r.ResponseData = data
+    r.Success = success
+    r.LeaderAddress = leaderAddr
 }
 
 type ClientRequest struct {
@@ -241,6 +254,12 @@ func (r *ClientResponse) GetRPCHeader() RPCHeader {
 
 func (r *ClientResponse) GetLeaderAddress() ServerAddress {
     return r.LeaderAddress
+}
+
+func (r *ClientResponse) ConstructResponse(data []byte, success bool, leaderAddr ServerAddress) {
+    r.ResponseData = data
+    r.Success = success
+    r.LeaderAddress = leaderAddr
 }
 
 type ClientIdRequest struct {
