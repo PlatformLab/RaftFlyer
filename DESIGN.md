@@ -4,13 +4,15 @@
 * Record and sync RPCs.
 * Keys sent with client requests to track commutativity in client operations.
 * Accept records only if operations stored in witnesses don't commute.
+* Master tries to apply command only locally if commutative. If not commutative, replicates synchronously and responds that it synced. 
+* Master synchronously replicates commands sent in Sync RPCs.
 * GC records at witnesses when done applying.
 * Send to witnesses and master in parallel, check for success or sync. If failure, send sync to master.
 
 ### CURP Code Base
 * `commands.go`: Sync and Record RPCs, add Synced field to ClientResponse to know if master synced. Add keys to ClientRequests.
 * `session.go`: Sending to all witnesses and master in parallel. If all succeeded or synced at master, succeed. Otherwise, send Sync RPC to master. Keep repeating until success.  
-* `raft.go`: Witness state defined. Garbage collect at witnesses when operation completed. Support for handling record requests: accept and record if keys commutative and not leader, reject otherwise.
+* `raft.go`: Witness state defined. Garbage collect at witnesses when operation completed. Support for handling record requests: accept and record if keys commutative and not leader, reject otherwise. Master syncs if operation not commutative, support for sync operation at master.
 * `api.go`: Add witness state to raft nodes.
 
 ## RIFL
