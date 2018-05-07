@@ -35,3 +35,4 @@
 * `api.go`: client response cache and next client ID state added to each raft node and snapshot restoring operations.
 
 Run tests for RIFL: `src/test/runTests.sh`
+Currently has a race condition
