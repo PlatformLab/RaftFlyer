@@ -4,13 +4,17 @@ import (
 	"time"
 )
 
-// clientResponse holds state about the response to a client RPC.
+// Manages the cache of client responses for use in RIFL, including
+// garbage collecting the cache.
+
+// clientResponseEntry holds state about the response to a client RPC.
 // For use in RIFL.
 type clientResponseEntry struct {
 	response  interface{}
 	timestamp time.Time
 }
 
+// Continuously check to garbage collect the cache.
 func (r *Raft) runGcClientResponseCache() {
 	for {
 		select {
@@ -23,8 +27,8 @@ func (r *Raft) runGcClientResponseCache() {
 	}
 }
 
+// Garbage collect entries in the cache that have expired.
 func (r *Raft) gcClientResponseCache() {
-	//    r.logger.Printf("**** GC CACHE ****")
 	r.clientResponseLock.RLock()
 	currTime := time.Now()
 	for clientID, clientCache := range r.clientResponseCache {

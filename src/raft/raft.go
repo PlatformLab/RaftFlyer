@@ -1394,6 +1394,9 @@ func (r *Raft) installSnapshot(rpc RPC, req *InstallSnapshotRequest) {
 // Handle a clientIdRequest from client. Can only be handled at
 // the leader. Assigns a new client ID and replicates the client
 // ID to followers.
+// Params:
+//   - rpc: RPC object used to send a response.
+//   - c: Client Id Request being handled.
 func (r *Raft) clientIdRequest(rpc RPC, c *ClientIdRequest) {
 	leader := r.Leader()
 	resp := &ClientIdResponse{
@@ -1419,6 +1422,12 @@ func (r *Raft) clientIdRequest(rpc RPC, c *ClientIdRequest) {
 	}
 }
 
+// Handle a syncRequest from client. Can only be handled at the
+// leader, and required a valid client ID. Synchronously 
+// executes the client command.
+// Params:
+//   - rpc: RPC object used to send a response
+//   - sync: Sync Request being handled.
 func (r *Raft) syncRequest(rpc RPC, sync *SyncRequest) {
 	r.logger.Printf("Tried to sync, not implemented yet")
 	leader := r.Leader()
@@ -1449,6 +1458,9 @@ func (r *Raft) syncRequest(rpc RPC, sync *SyncRequest) {
 	}
 }
 
+// Handle a recordRequest from client. Can only be handled
+// at a witness, not the leader. Records an operation successfully
+// if it is commutative with other stored operations.
 func (r *Raft) recordRequest(rpc RPC, record *RecordRequest) {
 	// Master can't act as a witness.
 	if r.getState() == Leader {
@@ -1473,6 +1485,14 @@ func (r *Raft) recordRequest(rpc RPC, record *RecordRequest) {
 	}
 }
 
+
+// Check if an operation is commutative with other operations
+// stored at the witness and if this is the case, store it and
+// return true, otherwise return false.
+// Params:
+//   - log: Log entry of type LogCommand to store.
+// Return true if successfully stored (must be commutative with
+// other operations, false otherwise.
 func (r *Raft) storeIfCommutative(log *Log) bool {
 	r.witnessState.lock.Lock()
 	defer r.witnessState.lock.Unlock()
@@ -1498,7 +1518,13 @@ func (r *Raft) storeIfCommutative(log *Log) bool {
 	return true
 }
 
-// Handle a clientRequest RPC from client.
+// Handle a clientRequest RPC from client. Can only be handled at
+// the leader. Requires a valid client ID. Only executes locally
+// and reports not synced if commutative, otherwise replicates
+// synchronously to followers and reports synced.
+// Params:
+//   - rpc: RPC object used to send a response.
+//   - c: Client Request object being handled.
 func (r *Raft) clientRequest(rpc RPC, c *ClientRequest) {
 	leader := r.Leader()
 	resp := &ClientResponse{
@@ -1528,6 +1554,14 @@ func (r *Raft) clientRequest(rpc RPC, c *ClientRequest) {
 	}
 }
 
+
+// Apply a command locally if it is commutative (not synced) or
+// replicate to followers (synced). Sets fields in resp based on
+// execution of request and if synced.
+// Params:
+//   - log: Log entry to apply, type LogCommand.
+//   - resp: Response to populate after completing command.
+//   - rpcErr: Pointer to error to set if necessary.
 func (r *Raft) applyCommand(log *Log, resp *ClientResponse, rpcErr *error) {
 	commutative := r.storeIfCommutative(log)
 	if commutative {
@@ -1541,7 +1575,13 @@ func (r *Raft) applyCommand(log *Log, resp *ClientResponse, rpcErr *error) {
 	}
 }
 
-// TODO: missing error handling here?
+// Apply a command locally. Should only be called by the leader if
+// the leader has confirmed that the operation is commutative and
+// is stored in its set of current operations.
+// Params:
+//   - log: Log entry to apply commutatively, type LogCommand.
+//   - resp: Response to populate after completing command.
+//   - rpcErr: Pointer to error to set if necessary.
 func (r *Raft) applyCommutativeCommand(log *Log, resp ClientOperationResponse, rpcErr *error) {
 	// Apply locally, store in witness cache, and respond
 	var response interface{}
@@ -1552,7 +1592,12 @@ func (r *Raft) applyCommutativeCommand(log *Log, resp ClientOperationResponse, r
 	r.goFunc(func() { r.Apply(log, 0) })
 }
 
-// Apply a command from leader to all raft FSMs. */
+// Replicate a command to followers. Should be called if leader has
+// confirmed that an operation is not commutative.
+// Params: 
+//   - log: Log entry to apply commutatively, type LogCommand.
+//   - resp: Response to populate after completing command.
+//   - rpcErr: Pointer to error to set if necessary.
 func (r *Raft) applySynchronousCommand(log *Log, resp ClientOperationResponse, rpcErr *error) {
 	f := r.Apply(log, 0)
 	if f.Error() != nil {

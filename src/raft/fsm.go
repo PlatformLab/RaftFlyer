@@ -136,6 +136,10 @@ func (r *Raft) runFSM() {
 	}
 }
 
+// Apply a command to the local FSM. Ensures exactly-once semantics with RIFL.
+// Params:
+//   - log: Log entry to apply locally. Should be of type LogCommand.
+//   - resp: Response object to populate after executing command.
 func (r *Raft) applyCommandLocally(log *Log, resp *interface{}) {
 	r.clientResponseLock.Lock()
 	clientCache, clientIdKnown := r.clientResponseCache[log.ClientID]
