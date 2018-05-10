@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -9,7 +10,6 @@ import (
 	"strconv"
 	"sync"
 	"time"
-    "encoding/json"
 
 	"github.com/armon/go-metrics"
 )
@@ -50,27 +50,26 @@ var (
 	// cluster that already has state present.
 	ErrCantBootstrap = errors.New("bootstrap only works on new clusters")
 
-    // ErrBadClientId is returned when a client issues a RPC with a client
-    // ID the cluster doesn't recognize.
-    ErrBadClientId = errors.New("bad client ID used")
+	// ErrBadClientId is returned when a client issues a RPC with a client
+	// ID the cluster doesn't recognize.
+	ErrBadClientId = errors.New("bad client ID used")
 
-    // ErrNotCommutative is returned when a client tries to push an operation
-    // to a witness that is not commutative with other operations stored at
-    // the witness.
-    ErrNotCommutative = errors.New("operation not commutative with operations in witness")
+	// ErrNotCommutative is returned when a client tries to push an operation
+	// to a witness that is not commutative with other operations stored at
+	// the witness.
+	ErrNotCommutative = errors.New("operation not commutative with operations in witness")
 
-    // ErrNotWitness is returned when a client contacts a leader instead of
-    // a witness.
-    ErrNotWitness = errors.New("contacted leader instead of witness")
+	// ErrNotWitness is returned when a client contacts a leader instead of
+	// a witness.
+	ErrNotWitness = errors.New("contacted leader instead of witness")
 
-    // ErrNoActiveServers is returned when a client tries to contact a cluster
-    // and cannot reach any servers.
-    ErrNoActiveServers = errors.New("no active raft servers found")
+	// ErrNoActiveServers is returned when a client tries to contact a cluster
+	// and cannot reach any servers.
+	ErrNoActiveServers = errors.New("no active raft servers found")
 
-
-    // ErrNoActiveLeader is returned when a client tries to contact a leader
-    // and cannot reach an active leader.
-    ErrNoActiveLeader = errors.New("no active leader found")
+	// ErrNoActiveLeader is returned when a client tries to contact a leader
+	// and cannot reach an active leader.
+	ErrNoActiveLeader = errors.New("no active leader found")
 )
 
 // Raft implements a Raft node.
@@ -131,11 +130,11 @@ type Raft struct {
 	// LogStore provides durable storage for logs
 	logs LogStore
 
-    // Cache of client responses. Used for RIFL. Map of ClientIDs to
-    // map of client RPC sequence numbers to response data. Periodically
-    // garbage collected.
-    clientResponseCache map[uint64]map[uint64]clientResponseEntry
-    clientResponseLock  sync.RWMutex
+	// Cache of client responses. Used for RIFL. Map of ClientIDs to
+	// map of client RPC sequence numbers to response data. Periodically
+	// garbage collected.
+	clientResponseCache map[uint64]map[uint64]clientResponseEntry
+	clientResponseLock  sync.RWMutex
 
 	// Used to request the leader to make configuration changes.
 	configurationChangeCh chan *configurationChangeFuture
@@ -144,10 +143,10 @@ type Raft struct {
 	// the log/snapshot.
 	configurations configurations
 
-    // Next Client ID to assign to new client. Used for RIFL.
-	nextClientId uint64;
+	// Next Client ID to assign to new client. Used for RIFL.
+	nextClientId uint64
 
-    // RPC chan comes from the transport layer
+	// RPC chan comes from the transport layer
 	rpcCh <-chan RPC
 
 	// Shutdown channel to exit, protected to prevent concurrent exits
@@ -189,8 +188,8 @@ type Raft struct {
 	observersLock sync.RWMutex
 	observers     map[uint64]*Observer
 
-    // State required to maintain witnesses.
-    witnessState    witnessState
+	// State required to maintain witnesses.
+	witnessState witnessState
 }
 
 // BootstrapCluster initializes a server's storage with the given cluster
@@ -303,8 +302,8 @@ func RecoverCluster(conf *Config, fsm FSM, logs LogStore, stable StableStore,
 	// Attempt to restore any snapshots we find, newest to oldest.
 	var snapshotIndex uint64
 	var snapshotTerm uint64
-    var snapshotClientId uint64
-    var snapshotClientResponseCache map[uint64]map[uint64]clientResponseEntry
+	var snapshotClientId uint64
+	var snapshotClientResponseCache map[uint64]map[uint64]clientResponseEntry
 	snapshots, err := snaps.List()
 	if err != nil {
 		return fmt.Errorf("failed to list snapshots: %v", err)
@@ -325,8 +324,8 @@ func RecoverCluster(conf *Config, fsm FSM, logs LogStore, stable StableStore,
 
 		snapshotIndex = snapshot.Index
 		snapshotTerm = snapshot.Term
-        snapshotClientId = snapshot.NextClientId
-        snapshotClientResponseCache = snapshot.ClientResponseCache
+		snapshotClientId = snapshot.NextClientId
+		snapshotClientResponseCache = snapshot.ClientResponseCache
 		break
 	}
 	if len(snapshots) > 0 && (snapshotIndex == 0 || snapshotTerm == 0) {
@@ -337,8 +336,8 @@ func RecoverCluster(conf *Config, fsm FSM, logs LogStore, stable StableStore,
 	// until we play back the Raft log entries.
 	lastIndex := snapshotIndex
 	lastTerm := snapshotTerm
-    lastClientId := snapshotClientId
-    lastClientResponseCache := snapshotClientResponseCache
+	lastClientId := snapshotClientId
+	lastClientResponseCache := snapshotClientResponseCache
 
 	// Apply any Raft log entries past the snapshot.
 	lastLogIndex, err := logs.LastIndex()
@@ -351,26 +350,26 @@ func RecoverCluster(conf *Config, fsm FSM, logs LogStore, stable StableStore,
 			return fmt.Errorf("failed to get log at index %d: %v", index, err)
 		}
 		if entry.Type == LogCommand {
-            resp := fsm.Apply(&entry)
-            data, err := json.Marshal(resp)
-            if err != nil {
-                return fmt.Errorf("failed to marshal response to command at index %d: %v", index, err)
-            }
-            clientCache, ok := lastClientResponseCache[entry.ClientID]
-            if !ok {
-                clientCache = make(map[uint64]clientResponseEntry)
-            }
-            clientCache[entry.SeqNo] = clientResponseEntry {
-                response:   data,
-                timestamp:  time.Now(),     // will be garbage collected later
-            }
-            lastClientResponseCache[entry.ClientID] = clientCache
+			resp := fsm.Apply(&entry)
+			data, err := json.Marshal(resp)
+			if err != nil {
+				return fmt.Errorf("failed to marshal response to command at index %d: %v", index, err)
+			}
+			clientCache, ok := lastClientResponseCache[entry.ClientID]
+			if !ok {
+				clientCache = make(map[uint64]clientResponseEntry)
+			}
+			clientCache[entry.SeqNo] = clientResponseEntry{
+				response:  data,
+				timestamp: time.Now(), // will be garbage collected later
+			}
+			lastClientResponseCache[entry.ClientID] = clientCache
 		}
-        if entry.Type == LogNextClientId {
-            if err := decodeMsgPack(entry.Data, &lastClientId); err != nil {
-                panic(fmt.Errorf("failed to decode next cliend id: %v", err))
-            }
-        }
+		if entry.Type == LogNextClientId {
+			if err := decodeMsgPack(entry.Data, &lastClientId); err != nil {
+				panic(fmt.Errorf("failed to decode next cliend id: %v", err))
+			}
+		}
 		lastIndex = entry.Index
 		lastTerm = entry.Term
 	}
@@ -496,22 +495,22 @@ func NewRaft(conf *Config, fsm FSM, logs LogStore, stable StableStore, snaps Sna
 
 	// Create Raft struct.
 	r := &Raft{
-		protocolVersion: protocolVersion,
-        applyCh:         make(chan *logFuture),
-		conf:            *conf,
-        clientResponseCache:    make(map[uint64]map[uint64]clientResponseEntry),
-        fsm:             fsm,
-		fsmMutateCh:     make(chan interface{}, 128),
-		fsmSnapshotCh:   make(chan *reqSnapshotFuture),
-		leaderCh:        make(chan bool),
-		localID:         localID,
-		localAddr:       localAddr,
-		logger:          logger,
-		logs:            logs,
+		protocolVersion:     protocolVersion,
+		applyCh:             make(chan *logFuture),
+		conf:                *conf,
+		clientResponseCache: make(map[uint64]map[uint64]clientResponseEntry),
+		fsm:                 fsm,
+		fsmMutateCh:         make(chan interface{}, 128),
+		fsmSnapshotCh:       make(chan *reqSnapshotFuture),
+		leaderCh:            make(chan bool),
+		localID:             localID,
+		localAddr:           localAddr,
+		logger:              logger,
+		logs:                logs,
 		configurationChangeCh: make(chan *configurationChangeFuture),
 		configurations:        configurations{},
-        nextClientId:           0,
-        rpcCh:                 trans.Consumer(),
+		nextClientId:          0,
+		rpcCh:                 trans.Consumer(),
 		snapshots:             snaps,
 		userSnapshotCh:        make(chan *userSnapshotFuture),
 		userRestoreCh:         make(chan *userRestoreFuture),
@@ -522,11 +521,11 @@ func NewRaft(conf *Config, fsm FSM, logs LogStore, stable StableStore, snaps Sna
 		configurationsCh:      make(chan *configurationsFuture, 8),
 		bootstrapCh:           make(chan *bootstrapFuture),
 		observers:             make(map[uint64]*Observer),
-        witnessState:          witnessState {
-                                    keys: make(map[*Key]bool),
-                                    records: make(map[*ClientSeqNo]*Log),
-                                },
-    }
+		witnessState: witnessState{
+			keys:    make(map[*Key]bool),
+			records: make(map[*ClientSeqNo]*Log),
+		},
+	}
 
 	// Initialize as a follower.
 	r.setState(Follower)
@@ -570,8 +569,8 @@ func NewRaft(conf *Config, fsm FSM, logs LogStore, stable StableStore, snaps Sna
 	r.goFunc(r.run)
 	r.goFunc(r.runFSM)
 	r.goFunc(r.runSnapshots)
-    r.goFunc(r.runGcClientResponseCache)
-    return r, nil
+	r.goFunc(r.runGcClientResponseCache)
+	return r, nil
 }
 
 // restoreSnapshot attempts to restore the latest snapshots, and fails if none
@@ -691,32 +690,32 @@ func (r *Raft) Apply(log *Log, timeout time.Duration) ApplyFuture {
 // Updates all Raft nodes with the value of NextClientId at the leader.
 // This must be run at the leader.
 func (r *Raft) SendNextClientId(timeout time.Duration) Future {
-    var timer <-chan time.Time
-    if timeout > 0 {
-        timer = time.After(timeout)
-    }
+	var timer <-chan time.Time
+	if timeout > 0 {
+		timer = time.After(timeout)
+	}
 
-    buf, err := encodeMsgPack(r.nextClientId)
-    if err != nil {
-        panic(fmt.Errorf("failed to encode next client id: %v", err))
-    }
+	buf, err := encodeMsgPack(r.nextClientId)
+	if err != nil {
+		panic(fmt.Errorf("failed to encode next client id: %v", err))
+	}
 
-    logFuture := &logFuture {
-        log: Log {
-            Type: LogNextClientId,
-            Data: buf.Bytes(),
-        },
-    }
-    logFuture.init()
+	logFuture := &logFuture{
+		log: Log{
+			Type: LogNextClientId,
+			Data: buf.Bytes(),
+		},
+	}
+	logFuture.init()
 
-    select {
-        case <-timer:
-            return errorFuture{ErrEnqueueTimeout}
-        case <-r.shutdownCh:
-            return errorFuture{ErrRaftShutdown}
-        case r.applyCh <-logFuture:
-            return logFuture
-    }
+	select {
+	case <-timer:
+		return errorFuture{ErrEnqueueTimeout}
+	case <-r.shutdownCh:
+		return errorFuture{ErrRaftShutdown}
+	case r.applyCh <- logFuture:
+		return logFuture
+	}
 }
 
 // Barrier is used to issue a command that blocks until all preceeding

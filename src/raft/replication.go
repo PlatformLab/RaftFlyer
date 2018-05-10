@@ -182,7 +182,7 @@ START:
 	}
 
 	// Make the RPC call
-    start = time.Now()
+	start = time.Now()
 	if err := r.trans.AppendEntries(s.peer.ID, s.peer.Address, &req, &resp); err != nil {
 		r.logger.Printf("[ERR] raft: Failed to AppendEntries to %v: %v", s.peer, err)
 		s.failures++
@@ -337,7 +337,7 @@ func (r *Raft) heartbeat(s *followerReplication, stopCh chan struct{}) {
 	var resp AppendEntriesResponse
 	for {
 		// Wait for the next heartbeat interval or forced notify
-        select {
+		select {
 		case <-s.notifyCh:
 		case <-randomTimeout(r.conf.HeartbeatTimeout / 10):
 		case <-stopCh:

@@ -32,8 +32,8 @@ const (
 	// when protocol version 1 or greater is in use.
 	LogConfiguration
 
-    // LogNextClientId is used to set the next client ID across the cluster.
-    LogNextClientId
+	// LogNextClientId is used to set the next client ID across the cluster.
+	LogNextClientId
 )
 
 // Log entries are replicated to all members of the Raft cluster
@@ -51,16 +51,17 @@ type Log struct {
 	// Data holds the log entry's type-specific data.
 	Data []byte
 
-    // Client ID. Only used for LogCommand.
-    ClientID uint64
+	// Client ID. Only used for LogCommand.
+	ClientID uint64
 
-    // Sequence number of command. Only used for LogCommand.
-    SeqNo uint64
+	// Sequence number of command. Only used for LogCommand.
+	SeqNo uint64
 
-    // Keys associated with RPC, used to check for commutativity.
-    Keys []Key
+	// Keys associated with RPC, used to check for commutativity.
+	Keys []Key
 }
 
+// Used to check for operations that conflict in commutativity checks.
 type Key []byte
 
 // LogStore is used to provide an interface for storing

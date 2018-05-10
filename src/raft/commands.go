@@ -185,7 +185,7 @@ func (r *RecordResponse) GetRPCHeader() RPCHeader {
 type SyncRequest struct {
 	RPCHeader
 
-    Entry *Log
+	Entry *Log
 }
 
 // See WithRPCHeader.
@@ -194,11 +194,11 @@ func (r *SyncRequest) GetRPCHeader() RPCHeader {
 }
 
 type GenericClientResponse interface {
-    GetLeaderAddress() ServerAddress
+	GetLeaderAddress() ServerAddress
 }
 
 type ClientOperationResponse interface {
-    ConstructResponse([]byte, bool, ServerAddress)
+	ConstructResponse([]byte, bool, ServerAddress)
 }
 
 // Sent when the master has completed the sync.
@@ -206,9 +206,9 @@ type SyncResponse struct {
 	RPCHeader
 
 	// True if successfully synced at master.
-	Success bool
-    LeaderAddress ServerAddress
-    ResponseData    []byte
+	Success       bool
+	LeaderAddress ServerAddress
+	ResponseData  []byte
 }
 
 // See WithRPCHeader.
@@ -217,20 +217,20 @@ func (r *SyncResponse) GetRPCHeader() RPCHeader {
 }
 
 func (r *SyncResponse) GetLeaderAddress() ServerAddress {
-    return r.LeaderAddress
+	return r.LeaderAddress
 }
 
 func (r *SyncResponse) ConstructResponse(data []byte, success bool, leaderAddr ServerAddress) {
-    r.ResponseData = data
-    r.Success = success
-    r.LeaderAddress = leaderAddr
+	r.ResponseData = data
+	r.Success = success
+	r.LeaderAddress = leaderAddr
 }
 
 type ClientRequest struct {
-    RPCHeader
+	RPCHeader
 
-    // New entry to commit. 
-    Entry       *Log
+	// New entry to commit.
+	Entry *Log
 }
 
 // See WithRPCHeader.
@@ -239,12 +239,12 @@ func (r *ClientRequest) GetRPCHeader() RPCHeader {
 }
 
 type ClientResponse struct {
-    RPCHeader
+	RPCHeader
 
-    Success bool
-    LeaderAddress ServerAddress
-    ResponseData  []byte 
-    Synced bool
+	Success       bool
+	LeaderAddress ServerAddress
+	ResponseData  []byte
+	Synced        bool
 }
 
 // See WithRPCHeader.
@@ -253,17 +253,17 @@ func (r *ClientResponse) GetRPCHeader() RPCHeader {
 }
 
 func (r *ClientResponse) GetLeaderAddress() ServerAddress {
-    return r.LeaderAddress
+	return r.LeaderAddress
 }
 
 func (r *ClientResponse) ConstructResponse(data []byte, success bool, leaderAddr ServerAddress) {
-    r.ResponseData = data
-    r.Success = success
-    r.LeaderAddress = leaderAddr
+	r.ResponseData = data
+	r.Success = success
+	r.LeaderAddress = leaderAddr
 }
 
 type ClientIdRequest struct {
-    RPCHeader
+	RPCHeader
 }
 
 // See WithRPCHeader.
@@ -272,13 +272,13 @@ func (r *ClientIdRequest) GetRPCHeader() RPCHeader {
 }
 
 type ClientIdResponse struct {
-    RPCHeader
+	RPCHeader
 
-    // ID of client assigned by cluster.
-    ClientID    uint64
+	// ID of client assigned by cluster.
+	ClientID uint64
 
-    // Address of active leader. Used as a hint to find active leader.
-    LeaderAddress ServerAddress
+	// Address of active leader. Used as a hint to find active leader.
+	LeaderAddress ServerAddress
 }
 
 // See WithRPCHeader.
@@ -287,6 +287,5 @@ func (r *ClientIdResponse) GetRPCHeader() RPCHeader {
 }
 
 func (r *ClientIdResponse) GetLeaderAddress() ServerAddress {
-    return r.LeaderAddress
+	return r.LeaderAddress
 }
-

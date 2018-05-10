@@ -22,11 +22,11 @@ type SnapshotMeta struct {
 	Index uint64
 	Term  uint64
 
-    // Next Client ID to use. Used with RIFL.
-    NextClientId uint64
+	// Next Client ID to use. Used with RIFL.
+	NextClientId uint64
 
-    // Responses to client RPCs. Used with RIFL.
-    ClientResponseCache map[uint64]map[uint64]clientResponseEntry
+	// Responses to client RPCs. Used with RIFL.
+	ClientResponseCache map[uint64]map[uint64]clientResponseEntry
 
 	// Peers is deprecated and used to support version 0 snapshots, but will
 	// be populated in version 1 snapshots as well to help with upgrades.

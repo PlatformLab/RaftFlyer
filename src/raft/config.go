@@ -194,30 +194,30 @@ type Config struct {
 	// is used.
 	Logger *log.Logger
 
-    // Interval at which to garbage collect the client response cache used with
-    // RIFL.
-    ClientResponseGcInterval time.Duration
+	// Interval at which to garbage collect the client response cache used with
+	// RIFL.
+	ClientResponseGcInterval time.Duration
 
-    // How long a client response should be kept in the cache to prevent duplicate
-    // execution. Used with RIFL.
-    ClientResponseGcRemoveTime time.Duration
+	// How long a client response should be kept in the cache to prevent duplicate
+	// execution. Used with RIFL.
+	ClientResponseGcRemoveTime time.Duration
 }
 
 // DefaultConfig returns a Config with usable defaults.
 func DefaultConfig() *Config {
 	return &Config{
-		ProtocolVersion:    ProtocolVersionMax,
-		HeartbeatTimeout:   1000 * time.Millisecond,
-		ElectionTimeout:    1000 * time.Millisecond,
-		CommitTimeout:      50 * time.Millisecond,
-		MaxAppendEntries:   64,
-		ShutdownOnRemove:   true,
-		TrailingLogs:       10240,
-		SnapshotInterval:   120 * time.Second,
-		SnapshotThreshold:  8192,
-		LeaderLeaseTimeout: 500 * time.Millisecond,
-        ClientResponseGcInterval:   time.Minute,
-        ClientResponseGcRemoveTime: 4 * time.Hour,
+		ProtocolVersion:            ProtocolVersionMax,
+		HeartbeatTimeout:           1000 * time.Millisecond,
+		ElectionTimeout:            1000 * time.Millisecond,
+		CommitTimeout:              50 * time.Millisecond,
+		MaxAppendEntries:           64,
+		ShutdownOnRemove:           true,
+		TrailingLogs:               10240,
+		SnapshotInterval:           120 * time.Second,
+		SnapshotThreshold:          8192,
+		LeaderLeaseTimeout:         500 * time.Millisecond,
+		ClientResponseGcInterval:   time.Minute,
+		ClientResponseGcRemoveTime: 4 * time.Hour,
 	}
 }
 
