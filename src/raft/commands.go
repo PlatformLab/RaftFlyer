@@ -193,15 +193,19 @@ func (r *SyncRequest) GetRPCHeader() RPCHeader {
 	return r.RPCHeader
 }
 
+// Interface used for all generic client requests so that client library
+// can find active leader.
 type GenericClientResponse interface {
 	GetLeaderAddress() ServerAddress
 }
 
+// Interface for client requests containing log entries to execute
+// (ClientResponse and SyncResponse).
 type ClientOperationResponse interface {
 	ConstructResponse([]byte, bool, ServerAddress)
 }
 
-// Sent when the master has completed the sync.
+// Sent when the master has completed the sync in response to SyncRequest.
 type SyncResponse struct {
 	RPCHeader
 
@@ -216,16 +220,19 @@ func (r *SyncResponse) GetRPCHeader() RPCHeader {
 	return r.RPCHeader
 }
 
+// See GenericClientResponse interface.
 func (r *SyncResponse) GetLeaderAddress() ServerAddress {
 	return r.LeaderAddress
 }
 
+// See ClientOperationResponse interface.
 func (r *SyncResponse) ConstructResponse(data []byte, success bool, leaderAddr ServerAddress) {
 	r.ResponseData = data
 	r.Success = success
 	r.LeaderAddress = leaderAddr
 }
 
+// Sent by the client to apply a command at a raft cluster.
 type ClientRequest struct {
 	RPCHeader
 
@@ -238,12 +245,18 @@ func (r *ClientRequest) GetRPCHeader() RPCHeader {
 	return r.RPCHeader
 }
 
+
+// Contains the result of applying a command, sent in response to ClientRequest.
 type ClientResponse struct {
 	RPCHeader
 
+    // True if command successfully executed.
 	Success       bool
+    // Address of current leader. Used to redirect from follower to leader.
 	LeaderAddress ServerAddress
+    // Response from applying command.
 	ResponseData  []byte
+    // True if leader synced (not commutative), false otherwise.
 	Synced        bool
 }
 
@@ -252,16 +265,20 @@ func (r *ClientResponse) GetRPCHeader() RPCHeader {
 	return r.RPCHeader
 }
 
+// See GenericClientResponse interface.
 func (r *ClientResponse) GetLeaderAddress() ServerAddress {
 	return r.LeaderAddress
 }
 
+// See ClientOperationResponse interface.
 func (r *ClientResponse) ConstructResponse(data []byte, success bool, leaderAddr ServerAddress) {
 	r.ResponseData = data
 	r.Success = success
 	r.LeaderAddress = leaderAddr
 }
 
+// Requests an ID for a client. Clients must have an ID allocated by
+// the leader to make requests.
 type ClientIdRequest struct {
 	RPCHeader
 }
@@ -271,6 +288,7 @@ func (r *ClientIdRequest) GetRPCHeader() RPCHeader {
 	return r.RPCHeader
 }
 
+// Returns an ID allocated by the leader, sent in response to ClientIdRequest.
 type ClientIdResponse struct {
 	RPCHeader
 
@@ -286,6 +304,7 @@ func (r *ClientIdResponse) GetRPCHeader() RPCHeader {
 	return r.RPCHeader
 }
 
+// See GenericClientResponse.
 func (r *ClientIdResponse) GetLeaderAddress() ServerAddress {
 	return r.LeaderAddress
 }
