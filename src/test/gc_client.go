@@ -9,6 +9,9 @@ import (
     "os"
 )
 
+// Tests correct garbage collection of client responses. Assumes that server is configured
+// to garbage collect responses that have been stored for less than 1 second.
+
 var c *keyValStore.Client
 
 func main() {

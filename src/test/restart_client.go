@@ -9,6 +9,9 @@ import (
     "os"
 )
 
+// Tests that cached client responses are correctly stored in a snapshot and restored
+// when the cluster is restarted.
+
 var c *keyValStore.Client
 
 func main() {

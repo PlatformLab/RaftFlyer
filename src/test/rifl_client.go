@@ -9,6 +9,10 @@ import (
     "os"
 )
 
+// Checks that RPCs issued from the same client with the same sequence number are only 
+// executed once, while RPCs from different clients with the same sequence numbers and
+// RPCs from the same client with different sequence numbers are reexecuted.
+
 var c1 *keyValStore.Client
 var c2 *keyValStore.Client
 

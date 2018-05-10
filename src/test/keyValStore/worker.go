@@ -7,6 +7,7 @@ import(
     "io"
 )
 
+// FSM running on Raft servers to implement key-val store.
 // *WorkerFSM implements raft.FSM by implementing Apply,
 // Snapshot, Restore.
 type WorkerFSM struct {
@@ -18,6 +19,9 @@ type WorkerFSM struct {
 type WorkerSnapshot struct{}
 
 // Create array of worker FSMs for starting a cluster.
+// Params:
+//   - n: number of workers to create.
+// Returns: array of raft FSMs of length n.
 func CreateWorkers(n int) ([]raft.FSM) {
     workers := make([]*WorkerFSM, n)
     for i := range workers {
@@ -33,8 +37,10 @@ func CreateWorkers(n int) ([]raft.FSM) {
     return fsms
 }
 
-// TODO: remove callbacks from raft
-// Apply command to FSM and return response and callback
+// Apply command to FSM and return response.
+// Params:
+//   - log: log entry to apply to FSM.
+// Returns: response JSON object.
 func (w *WorkerFSM) Apply(log *raft.Log)(interface{}) {
     args := make(map[string]string)
     err := json.Unmarshal(log.Data, &args)
@@ -56,16 +62,18 @@ func (w *WorkerFSM) Apply(log *raft.Log)(interface{}) {
     return nil
 }
 
-// TODO: implement for key-value store
+// Don't need full implementation for testing.
 func (w *WorkerFSM) Snapshot() (raft.FSMSnapshot, error) {
     return WorkerSnapshot{}, nil
 }
 
-// TODO: implement for key-value store
+// Don't need full implementation for testing.
 func (w *WorkerFSM) Restore(i io.ReadCloser) error {
     return nil
 }
 
+// Don't need full implementation for testing.
 func (s WorkerSnapshot) Persist(sink raft.SnapshotSink) error {return nil}
 
+// Don't need full implementation for testing.
 func (s WorkerSnapshot) Release() {}

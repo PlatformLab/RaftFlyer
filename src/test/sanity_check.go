@@ -9,6 +9,8 @@ import (
     "test/utils"
 )
 
+// Sanity check to verify that client can send request and receive response.
+
 var c *keyValStore.Client
 
 func main() {

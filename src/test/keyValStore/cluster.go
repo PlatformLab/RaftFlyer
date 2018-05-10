@@ -9,11 +9,24 @@ import(
 	"os"
 )
 
+// Manage keyValStore cluster locally, including making a new cluster, 
+// restarting a cluster, and shutting down a cluster.
 
+// Start a new Raft cluster locally.
+// Params:
+//   - n: number of servers in cluster.
+//   - fsms: fsms to run on servers.
+//   - addrs: addresses of servers in cluster.
+//   - gcInterval: interval at which to garbage collect client responses
+//   - gcRemoveTime: length of time to cache client responses before garbage collection.
+// Returns: running cluster.
 func MakeNewCluster(n int, fsms []raft.FSM, addrs []raft.ServerAddress, gcInterval time.Duration, gcRemoveTime time.Duration) *cluster {
     return MakeCluster(n, fsms, addrs, gcInterval, gcRemoveTime, nil)
 }
 
+// Given a cluster that has been stopped, restart it. 
+// Params:
+//   - c : cluster to restart.
 func RestartCluster(c *cluster) {
     for i := range c.fsms {
         trans, err := raft.NewTCPTransport(string(c.trans[i].LocalAddr()), nil, 2, time.Second, nil)
@@ -39,9 +52,11 @@ func RestartCluster(c *cluster) {
 
 		raft.AddVoter(peerConf.LocalID, c.trans[i].LocalAddr(), 0, 0)
     }
-
 }
 
+// Shutdown a set of running Raft servers.
+// Params:
+//   - nodes: array of running Raft nodes.
 func ShutdownCluster(nodes []*raft.Raft) {
     for _,node := range nodes {
         f := node.Shutdown()
@@ -52,6 +67,12 @@ func ShutdownCluster(nodes []*raft.Raft) {
 }
 
 // Starts up a new cluster.
+// Params:
+//   - n: number of servers in cluster.
+//   - fsms: array of FSMs to run at Raft servers.
+//   - addrs: addresses of Raft servers.
+//   - gcInterval: interval at which to check for expired client responses.
+//   - gcRemoveTime: interval at which client responses expire.
 func MakeCluster(n int, fsms []raft.FSM, addrs []raft.ServerAddress, gcInterval time.Duration, gcRemoveTime time.Duration, startingCluster *cluster) (*cluster) {
     conf := raft.DefaultConfig()
     if gcInterval != 0 {
@@ -129,6 +150,7 @@ func MakeCluster(n int, fsms []raft.FSM, addrs []raft.ServerAddress, gcInterval 
     return c
 }
 
+// Representation of cluster.
 type cluster struct {
 	dirs             []string
 	stores           []*raft.InmemStore

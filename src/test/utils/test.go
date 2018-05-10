@@ -7,6 +7,12 @@ import (
     "reflect"
 )
 
+// Run a series of tests and print if they pass or fail.
+// Params:
+//   - tests: variable-length list of test functions to run. Expected
+//            to have no arguments and return an error (nil if success
+//            description of error if failure).
+// Returns: number of tests failed
 func RunTestSuite(tests ...func()(error)) int {
     testsFailed := 0
 

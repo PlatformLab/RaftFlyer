@@ -1,3 +1,5 @@
+# Run all CURP tests.
+
 if ! go build run_cluster.go
 then
     echo "Cluster build failing. Cannot run tests."

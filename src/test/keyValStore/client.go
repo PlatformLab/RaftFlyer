@@ -5,6 +5,10 @@ import (
     "encoding/json"
 )
 
+// Client library for sending RPCs to keyValStore Raft servers. Allows you
+// to set a key, get a value, and increment an integer.
+
+// Handle given to client to make reqeuests.
 type Client struct {
     // Client transport layer.
     trans       *raft.NetworkTransport
@@ -15,6 +19,10 @@ type Client struct {
 }
 
 // Create new client for sending RPCs.
+// Params:
+//   - trans: transport layer for client.
+//   - servers: list of Raft server addresses.
+// Returns: client handle, error if any.
 func CreateClient(trans *raft.NetworkTransport, servers []raft.ServerAddress) (*Client, error) {
     newSession, err := raft.CreateClientSession(trans, servers)
     if err != nil {
@@ -32,6 +40,8 @@ func (c *Client) DestroyClient() {
     c.session.CloseClientSession()
 }
 
+// Increment integer and return value. Not idempotent!
+// Returns: updated value of integer.
 func (c *Client) Inc() (uint64, error) {
     args := make(map[string]string)
     args[FunctionArg] = IncCommand
@@ -50,6 +60,11 @@ func (c *Client) Inc() (uint64, error) {
     return response.Value, nil
 }
 
+// Same as Inc() but specifies sequence number. Use for testing
+// purposes only (in production only use Inc).
+// Params:
+//   - seqno: Sequence number to use when sending RPC.
+// Returns: updated value of integer.
 func (c *Client) IncWithSeqno(seqno uint64) (uint64, error) {
     args := make(map[string]string)
     args[FunctionArg] = IncCommand
@@ -70,6 +85,9 @@ func (c *Client) IncWithSeqno(seqno uint64) (uint64, error) {
 
 
 // Send RPC to set the value of a key. No expected response.
+// Params:
+//   - key: Key to access.
+//   - value: Value to set with key.
 func (c *Client) Set(key string, value string) error {
     args := make(map[string]string)
     args[FunctionArg] = SetCommand
@@ -84,7 +102,10 @@ func (c *Client) Set(key string, value string) error {
     return nil
 }
 
-// Send RPC to get the value of a key. Empty string if error. 
+// Send RPC to get the value of a key. 
+// Params:
+//   - key: Key to get value of.
+// Returns: value of key, empty string if error not nil.
 func (c *Client) Get(key string) (string, error) {
     args := make(map[string]string)
     args[FunctionArg] = GetCommand

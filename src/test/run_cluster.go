@@ -10,6 +10,7 @@ import(
     "fmt"
 )
 
+// Start a Raft cluster locally.
 // Optional first argument is interval at which to garbage collect entries from client response cache
 // in milliseconds. Optional second argument is length of time that entries should be left in the 
 // client response cache before being garbage collected (in milliseconds).
