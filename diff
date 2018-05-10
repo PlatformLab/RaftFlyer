@@ -1,0 +1,2813 @@
+diff --git a/DESIGN.md b/DESIGN.md
+new file mode 100644
+index 0000000..6ee92fd
+--- /dev/null
++++ b/DESIGN.md
+@@ -0,0 +1,38 @@
++## CURP
++
++### Completed for CURP
++* Record and sync RPCs.
++* Keys sent with client requests to track commutativity in client operations.
++* Accept records only if operations stored in witnesses don't commute.
++* Master tries to apply command only locally if commutative. If not commutative, replicates synchronously and responds that it synced. 
++* Master synchronously replicates commands sent in Sync RPCs.
++* GC records at witnesses when done applying.
++* Send to witnesses and master in parallel, check for success or sync. If failure, send sync to master.
++
++### CURP Code Base
++* `commands.go`: Sync and Record RPCs, add Synced field to ClientResponse to know if master synced. Add keys to ClientRequests.
++* `session.go`: Sending to all witnesses and master in parallel. If all succeeded or synced at master, succeed. Otherwise, send Sync RPC to master. Keep repeating until success.  
++* `raft.go`: Witness state defined. Garbage collect at witnesses when operation completed. Support for handling record requests: accept and record if keys commutative and not leader, reject otherwise. Master syncs if operation not commutative, support for sync operation at master.
++* `api.go`: Add witness state to raft nodes.
++
++## RIFL
++
++### Completed for RIFL
++* Added client IDs and sequence numbers to client RPCs
++* Assign client ID at master using global nextClientId
++* Replicate nextClientId counter to other servers with LogNextClientId operation
++* Store responses to client RPCs in cache that is periodically garbage-collected based on configurable timeout
++* Check for duplicate before applying to state machine
++* Make nextClientId and cache of client responses persistent.
++
++### RIFL Code Base
++* `raft.go`: Support for ClientId RPC handling, incrementing nextClientId at all replicas
++* `client_response_cache.go`: Stores state about the response to a client RPC along with a timestamp. Cache is periodically garbage collected.
++* `config.go`: Set interval at which to garbage collect cache and how long responses to client RPCs should remain cached
++* `snapshot.go`: Support for snapshotting the client response cache and the next client ID (must be stored persistently).
++* `commands.go`: RPC format for ClientRequest and ClientResponse updated to contain Client ID and sequence number, new RPC format ClientIdRequest and ClientIdResponse. GenericClientRequest for sending a request to a Raft leader.
++* `session.go`: Starting a client session requires getting a new client ID, use that client ID and assign monotonically increasing sequence numbers for client RPCs.
++* `api.go`: client response cache and next client ID state added to each raft node and snapshot restoring operations.
++
++Run tests for RIFL: `src/test/runTests.sh`
++Currently has a race condition
+diff --git a/src/raft/api.go b/src/raft/api.go
+index 814d7e7..b3e76c7 100644
+--- a/src/raft/api.go
++++ b/src/raft/api.go
+@@ -1,6 +1,7 @@
+ package raft
+ 
+ import (
++	"encoding/json"
+ 	"errors"
+ 	"fmt"
+ 	"io"
+@@ -48,6 +49,27 @@ var (
+ 	// ErrCantBootstrap is returned when attempt is made to bootstrap a
+ 	// cluster that already has state present.
+ 	ErrCantBootstrap = errors.New("bootstrap only works on new clusters")
++
++	// ErrBadClientId is returned when a client issues a RPC with a client
++	// ID the cluster doesn't recognize.
++	ErrBadClientId = errors.New("bad client ID used")
++
++	// ErrNotCommutative is returned when a client tries to push an operation
++	// to a witness that is not commutative with other operations stored at
++	// the witness.
++	ErrNotCommutative = errors.New("operation not commutative with operations in witness")
++
++	// ErrNotWitness is returned when a client contacts a leader instead of
++	// a witness.
++	ErrNotWitness = errors.New("contacted leader instead of witness")
++
++	// ErrNoActiveServers is returned when a client tries to contact a cluster
++	// and cannot reach any servers.
++	ErrNoActiveServers = errors.New("no active raft servers found")
++
++	// ErrNoActiveLeader is returned when a client tries to contact a leader
++	// and cannot reach an active leader.
++	ErrNoActiveLeader = errors.New("no active leader found")
+ )
+ 
+ // Raft implements a Raft node.
+@@ -108,6 +130,12 @@ type Raft struct {
+ 	// LogStore provides durable storage for logs
+ 	logs LogStore
+ 
++	// Cache of client responses. Used for RIFL. Map of ClientIDs to
++	// map of client RPC sequence numbers to response data. Periodically
++	// garbage collected.
++	clientResponseCache map[uint64]map[uint64]clientResponseEntry
++	clientResponseLock  sync.RWMutex
++
+ 	// Used to request the leader to make configuration changes.
+ 	configurationChangeCh chan *configurationChangeFuture
+ 
+@@ -115,6 +143,9 @@ type Raft struct {
+ 	// the log/snapshot.
+ 	configurations configurations
+ 
++	// Next Client ID to assign to new client. Used for RIFL.
++	nextClientId uint64
++
+ 	// RPC chan comes from the transport layer
+ 	rpcCh <-chan RPC
+ 
+@@ -156,6 +187,9 @@ type Raft struct {
+ 	// is indexed by an artificial ID which is used for deregistration.
+ 	observersLock sync.RWMutex
+ 	observers     map[uint64]*Observer
++
++	// State required to maintain witnesses.
++	witnessState witnessState
+ }
+ 
+ // BootstrapCluster initializes a server's storage with the given cluster
+@@ -268,6 +302,8 @@ func RecoverCluster(conf *Config, fsm FSM, logs LogStore, stable StableStore,
+ 	// Attempt to restore any snapshots we find, newest to oldest.
+ 	var snapshotIndex uint64
+ 	var snapshotTerm uint64
++	var snapshotClientId uint64
++	var snapshotClientResponseCache map[uint64]map[uint64]clientResponseEntry
+ 	snapshots, err := snaps.List()
+ 	if err != nil {
+ 		return fmt.Errorf("failed to list snapshots: %v", err)
+@@ -288,6 +324,8 @@ func RecoverCluster(conf *Config, fsm FSM, logs LogStore, stable StableStore,
+ 
+ 		snapshotIndex = snapshot.Index
+ 		snapshotTerm = snapshot.Term
++		snapshotClientId = snapshot.NextClientId
++		snapshotClientResponseCache = snapshot.ClientResponseCache
+ 		break
+ 	}
+ 	if len(snapshots) > 0 && (snapshotIndex == 0 || snapshotTerm == 0) {
+@@ -298,6 +336,8 @@ func RecoverCluster(conf *Config, fsm FSM, logs LogStore, stable StableStore,
+ 	// until we play back the Raft log entries.
+ 	lastIndex := snapshotIndex
+ 	lastTerm := snapshotTerm
++	lastClientId := snapshotClientId
++	lastClientResponseCache := snapshotClientResponseCache
+ 
+ 	// Apply any Raft log entries past the snapshot.
+ 	lastLogIndex, err := logs.LastIndex()
+@@ -310,7 +350,25 @@ func RecoverCluster(conf *Config, fsm FSM, logs LogStore, stable StableStore,
+ 			return fmt.Errorf("failed to get log at index %d: %v", index, err)
+ 		}
+ 		if entry.Type == LogCommand {
+-			_,_ = fsm.Apply(&entry)
++			resp := fsm.Apply(&entry)
++			data, err := json.Marshal(resp)
++			if err != nil {
++				return fmt.Errorf("failed to marshal response to command at index %d: %v", index, err)
++			}
++			clientCache, ok := lastClientResponseCache[entry.ClientID]
++			if !ok {
++				clientCache = make(map[uint64]clientResponseEntry)
++			}
++			clientCache[entry.SeqNo] = clientResponseEntry{
++				response:  data,
++				timestamp: time.Now(), // will be garbage collected later
++			}
++			lastClientResponseCache[entry.ClientID] = clientCache
++		}
++		if entry.Type == LogNextClientId {
++			if err := decodeMsgPack(entry.Data, &lastClientId); err != nil {
++				panic(fmt.Errorf("failed to decode next cliend id: %v", err))
++			}
+ 		}
+ 		lastIndex = entry.Index
+ 		lastTerm = entry.Term
+@@ -323,7 +381,7 @@ func RecoverCluster(conf *Config, fsm FSM, logs LogStore, stable StableStore,
+ 		return fmt.Errorf("failed to snapshot FSM: %v", err)
+ 	}
+ 	version := getSnapshotVersion(conf.ProtocolVersion)
+-	sink, err := snaps.Create(version, lastIndex, lastTerm, configuration, 1, trans)
++	sink, err := snaps.Create(version, lastIndex, lastTerm, configuration, 1, lastClientId, lastClientResponseCache, trans)
+ 	if err != nil {
+ 		return fmt.Errorf("failed to create snapshot: %v", err)
+ 	}
+@@ -437,19 +495,21 @@ func NewRaft(conf *Config, fsm FSM, logs LogStore, stable StableStore, snaps Sna
+ 
+ 	// Create Raft struct.
+ 	r := &Raft{
+-		protocolVersion: protocolVersion,
+-        applyCh:         make(chan *logFuture),
+-		conf:            *conf,
+-		fsm:             fsm,
+-		fsmMutateCh:     make(chan interface{}, 128),
+-		fsmSnapshotCh:   make(chan *reqSnapshotFuture),
+-		leaderCh:        make(chan bool),
+-		localID:         localID,
+-		localAddr:       localAddr,
+-		logger:          logger,
+-		logs:            logs,
++		protocolVersion:     protocolVersion,
++		applyCh:             make(chan *logFuture),
++		conf:                *conf,
++		clientResponseCache: make(map[uint64]map[uint64]clientResponseEntry),
++		fsm:                 fsm,
++		fsmMutateCh:         make(chan interface{}, 128),
++		fsmSnapshotCh:       make(chan *reqSnapshotFuture),
++		leaderCh:            make(chan bool),
++		localID:             localID,
++		localAddr:           localAddr,
++		logger:              logger,
++		logs:                logs,
+ 		configurationChangeCh: make(chan *configurationChangeFuture),
+ 		configurations:        configurations{},
++		nextClientId:          0,
+ 		rpcCh:                 trans.Consumer(),
+ 		snapshots:             snaps,
+ 		userSnapshotCh:        make(chan *userSnapshotFuture),
+@@ -461,7 +521,11 @@ func NewRaft(conf *Config, fsm FSM, logs LogStore, stable StableStore, snaps Sna
+ 		configurationsCh:      make(chan *configurationsFuture, 8),
+ 		bootstrapCh:           make(chan *bootstrapFuture),
+ 		observers:             make(map[uint64]*Observer),
+-    }
++		witnessState: witnessState{
++			keys:    make(map[*Key]bool),
++			records: make(map[*ClientSeqNo]*Log),
++		},
++	}
+ 
+ 	// Initialize as a follower.
+ 	r.setState(Follower)
+@@ -505,6 +569,7 @@ func NewRaft(conf *Config, fsm FSM, logs LogStore, stable StableStore, snaps Sna
+ 	r.goFunc(r.run)
+ 	r.goFunc(r.runFSM)
+ 	r.goFunc(r.runSnapshots)
++	r.goFunc(r.runGcClientResponseCache)
+ 	return r, nil
+ }
+ 
+@@ -599,7 +664,7 @@ func (r *Raft) Leader() ServerAddress {
+ // An optional timeout can be provided to limit the amount of time we wait
+ // for the command to be started. This must be run on the leader or it
+ // will fail.
+-func (r *Raft) Apply(cmd []byte, timeout time.Duration) ApplyFuture {
++func (r *Raft) Apply(log *Log, timeout time.Duration) ApplyFuture {
+ 	metrics.IncrCounter([]string{"raft", "apply"}, 1)
+ 	var timer <-chan time.Time
+ 	if timeout > 0 {
+@@ -607,10 +672,38 @@ func (r *Raft) Apply(cmd []byte, timeout time.Duration) ApplyFuture {
+ 	}
+ 
+ 	// Create a log future, no index or term yet
++	logFuture := &logFuture{
++		log: *log,
++	}
++	logFuture.init()
++
++	select {
++	case <-timer:
++		return errorFuture{ErrEnqueueTimeout}
++	case <-r.shutdownCh:
++		return errorFuture{ErrRaftShutdown}
++	case r.applyCh <- logFuture:
++		return logFuture
++	}
++}
++
++// Updates all Raft nodes with the value of NextClientId at the leader.
++// This must be run at the leader.
++func (r *Raft) SendNextClientId(timeout time.Duration) Future {
++	var timer <-chan time.Time
++	if timeout > 0 {
++		timer = time.After(timeout)
++	}
++
++	buf, err := encodeMsgPack(r.nextClientId)
++	if err != nil {
++		panic(fmt.Errorf("failed to encode next client id: %v", err))
++	}
++
+ 	logFuture := &logFuture{
+ 		log: Log{
+-			Type: LogCommand,
+-			Data: cmd,
++			Type: LogNextClientId,
++			Data: buf.Bytes(),
+ 		},
+ 	}
+ 	logFuture.init()
+diff --git a/src/raft/client_response_cache.go b/src/raft/client_response_cache.go
+new file mode 100644
+index 0000000..6ff2189
+--- /dev/null
++++ b/src/raft/client_response_cache.go
+@@ -0,0 +1,47 @@
++package raft
++
++import (
++	"time"
++)
++
++// Manages the cache of client responses for use in RIFL, including
++// garbage collecting the cache.
++
++// clientResponseEntry holds state about the response to a client RPC.
++// For use in RIFL.
++type clientResponseEntry struct {
++	response  interface{}
++	timestamp time.Time
++}
++
++// Continuously check to garbage collect the cache.
++func (r *Raft) runGcClientResponseCache() {
++	for {
++		select {
++		case <-randomTimeout(r.conf.ClientResponseGcInterval):
++			r.gcClientResponseCache()
++
++		case <-r.shutdownCh:
++			return
++		}
++	}
++}
++
++// Garbage collect entries in the cache that have expired.
++func (r *Raft) gcClientResponseCache() {
++	r.clientResponseLock.RLock()
++	currTime := time.Now()
++	for clientID, clientCache := range r.clientResponseCache {
++		for seqNo, entry := range clientCache {
++			if currTime.Sub(entry.timestamp) >= r.conf.ClientResponseGcRemoveTime {
++				r.clientResponseLock.RUnlock()
++				r.clientResponseLock.Lock()
++				delete(clientCache, seqNo) // does nothing if key does not exist, no race condition
++				r.clientResponseLock.Unlock()
++				r.clientResponseLock.RLock()
++			}
++		}
++		r.clientResponseCache[clientID] = clientCache
++	}
++	r.clientResponseLock.RUnlock()
++}
+diff --git a/src/raft/commands.go b/src/raft/commands.go
+index 1f0e447..f92ca50 100644
+--- a/src/raft/commands.go
++++ b/src/raft/commands.go
+@@ -150,17 +150,94 @@ func (r *InstallSnapshotResponse) GetRPCHeader() RPCHeader {
+ 	return r.RPCHeader
+ }
+ 
++// Record RPCs are used to store commutative operations at witnesses.
++// Accepted if commutative with other operations at witness, rejected
++// otherwise.
++type RecordRequest struct {
++	RPCHeader
++
++	// Entry to commit
++	Entry *Log
++}
++
++// See WithRPCHeader.
++func (r *RecordRequest) GetRPCHeader() RPCHeader {
++	return r.RPCHeader
++}
++
++// Record RPCs are used to store commutative operations at witnesses.
++// Accepted if commutative with other operations at witness, rejected
++// otherwise.
++type RecordResponse struct {
++	RPCHeader
++
++	// True if operation recorded at witness, false otherwise.
++	Success bool
++}
++
++// See WithRPCHeader.
++func (r *RecordResponse) GetRPCHeader() RPCHeader {
++	return r.RPCHeader
++}
++
++// Issued by a client to the master when a client cannot record an
++// operation in all witnesses.
++type SyncRequest struct {
++	RPCHeader
++
++	Entry *Log
++}
++
++// See WithRPCHeader.
++func (r *SyncRequest) GetRPCHeader() RPCHeader {
++	return r.RPCHeader
++}
++
++// Interface used for all generic client requests so that client library
++// can find active leader.
++type GenericClientResponse interface {
++	GetLeaderAddress() ServerAddress
++}
++
++// Interface for client requests containing log entries to execute
++// (ClientResponse and SyncResponse).
++type ClientOperationResponse interface {
++	ConstructResponse([]byte, bool, ServerAddress)
++}
++
++// Sent when the master has completed the sync in response to SyncRequest.
++type SyncResponse struct {
++	RPCHeader
++
++	// True if successfully synced at master.
++	Success       bool
++	LeaderAddress ServerAddress
++	ResponseData  []byte
++}
++
++// See WithRPCHeader.
++func (r *SyncResponse) GetRPCHeader() RPCHeader {
++	return r.RPCHeader
++}
++
++// See GenericClientResponse interface.
++func (r *SyncResponse) GetLeaderAddress() ServerAddress {
++	return r.LeaderAddress
++}
++
++// See ClientOperationResponse interface.
++func (r *SyncResponse) ConstructResponse(data []byte, success bool, leaderAddr ServerAddress) {
++	r.ResponseData = data
++	r.Success = success
++	r.LeaderAddress = leaderAddr
++}
++
++// Sent by the client to apply a command at a raft cluster.
+ type ClientRequest struct {
+-    RPCHeader
++	RPCHeader
+ 
+-    // New entries to commit. 
+-    Entries[] *Log
+-    // True if should initiate or maintain session, false otherwise.
+-    KeepSession bool
+-    // ID of client to contact raft server. 
+-    ClientAddr ServerAddress
+-    // Command to be executed when client session terminates.
+-    EndSessionCommand []byte
++	// New entry to commit.
++	Entry *Log
+ }
+ 
+ // See WithRPCHeader.
+@@ -168,15 +245,66 @@ func (r *ClientRequest) GetRPCHeader() RPCHeader {
+ 	return r.RPCHeader
+ }
+ 
++
++// Contains the result of applying a command, sent in response to ClientRequest.
+ type ClientResponse struct {
+-    RPCHeader
++	RPCHeader
+ 
+-    Success bool
+-    LeaderAddress ServerAddress
+-    ResponseData  []byte 
++    // True if command successfully executed.
++	Success       bool
++    // Address of current leader. Used to redirect from follower to leader.
++	LeaderAddress ServerAddress
++    // Response from applying command.
++	ResponseData  []byte
++    // True if leader synced (not commutative), false otherwise.
++	Synced        bool
+ }
+ 
+ // See WithRPCHeader.
+ func (r *ClientResponse) GetRPCHeader() RPCHeader {
+ 	return r.RPCHeader
+ }
++
++// See GenericClientResponse interface.
++func (r *ClientResponse) GetLeaderAddress() ServerAddress {
++	return r.LeaderAddress
++}
++
++// See ClientOperationResponse interface.
++func (r *ClientResponse) ConstructResponse(data []byte, success bool, leaderAddr ServerAddress) {
++	r.ResponseData = data
++	r.Success = success
++	r.LeaderAddress = leaderAddr
++}
++
++// Requests an ID for a client. Clients must have an ID allocated by
++// the leader to make requests.
++type ClientIdRequest struct {
++	RPCHeader
++}
++
++// See WithRPCHeader.
++func (r *ClientIdRequest) GetRPCHeader() RPCHeader {
++	return r.RPCHeader
++}
++
++// Returns an ID allocated by the leader, sent in response to ClientIdRequest.
++type ClientIdResponse struct {
++	RPCHeader
++
++	// ID of client assigned by cluster.
++	ClientID uint64
++
++	// Address of active leader. Used as a hint to find active leader.
++	LeaderAddress ServerAddress
++}
++
++// See WithRPCHeader.
++func (r *ClientIdResponse) GetRPCHeader() RPCHeader {
++	return r.RPCHeader
++}
++
++// See GenericClientResponse.
++func (r *ClientIdResponse) GetLeaderAddress() ServerAddress {
++	return r.LeaderAddress
++}
+diff --git a/src/raft/config.go b/src/raft/config.go
+index c1ce03a..e0fd258 100644
+--- a/src/raft/config.go
++++ b/src/raft/config.go
+@@ -193,21 +193,31 @@ type Config struct {
+ 	// Logger is a user-provided logger. If nil, a logger writing to LogOutput
+ 	// is used.
+ 	Logger *log.Logger
++
++	// Interval at which to garbage collect the client response cache used with
++	// RIFL.
++	ClientResponseGcInterval time.Duration
++
++	// How long a client response should be kept in the cache to prevent duplicate
++	// execution. Used with RIFL.
++	ClientResponseGcRemoveTime time.Duration
+ }
+ 
+ // DefaultConfig returns a Config with usable defaults.
+ func DefaultConfig() *Config {
+ 	return &Config{
+-		ProtocolVersion:    ProtocolVersionMax,
+-		HeartbeatTimeout:   1000 * time.Millisecond,
+-		ElectionTimeout:    1000 * time.Millisecond,
+-		CommitTimeout:      50 * time.Millisecond,
+-		MaxAppendEntries:   64,
+-		ShutdownOnRemove:   true,
+-		TrailingLogs:       10240,
+-		SnapshotInterval:   120 * time.Second,
+-		SnapshotThreshold:  8192,
+-		LeaderLeaseTimeout: 500 * time.Millisecond,
++		ProtocolVersion:            ProtocolVersionMax,
++		HeartbeatTimeout:           1000 * time.Millisecond,
++		ElectionTimeout:            1000 * time.Millisecond,
++		CommitTimeout:              50 * time.Millisecond,
++		MaxAppendEntries:           64,
++		ShutdownOnRemove:           true,
++		TrailingLogs:               10240,
++		SnapshotInterval:           120 * time.Second,
++		SnapshotThreshold:          8192,
++		LeaderLeaseTimeout:         500 * time.Millisecond,
++		ClientResponseGcInterval:   time.Minute,
++		ClientResponseGcRemoveTime: 4 * time.Hour,
+ 	}
+ }
+ 
+diff --git a/src/raft/file_snapshot.go b/src/raft/file_snapshot.go
+index ffc9414..3db614d 100644
+--- a/src/raft/file_snapshot.go
++++ b/src/raft/file_snapshot.go
+@@ -141,7 +141,7 @@ func snapshotName(term, index uint64) string {
+ 
+ // Create is used to start a new snapshot
+ func (f *FileSnapshotStore) Create(version SnapshotVersion, index, term uint64,
+-	configuration Configuration, configurationIndex uint64, trans Transport) (SnapshotSink, error) {
++	configuration Configuration, configurationIndex uint64, nextClientId uint64, clientResponseCache map[uint64]map[uint64]clientResponseEntry, trans Transport) (SnapshotSink, error) {
+ 	// We only support version 1 snapshots at this time.
+ 	if version != 1 {
+ 		return nil, fmt.Errorf("unsupported snapshot version %d", version)
+@@ -166,13 +166,15 @@ func (f *FileSnapshotStore) Create(version SnapshotVersion, index, term uint64,
+ 		parentDir: f.path,
+ 		meta: fileSnapshotMeta{
+ 			SnapshotMeta: SnapshotMeta{
+-				Version:            version,
+-				ID:                 name,
+-				Index:              index,
+-				Term:               term,
+-				Peers:              encodePeers(configuration, trans),
+-				Configuration:      configuration,
+-				ConfigurationIndex: configurationIndex,
++				Version:             version,
++				ID:                  name,
++				Index:               index,
++				Term:                term,
++				NextClientId:        nextClientId,
++				ClientResponseCache: clientResponseCache,
++				Peers:               encodePeers(configuration, trans),
++				Configuration:       configuration,
++				ConfigurationIndex:  configurationIndex,
+ 			},
+ 			CRC: nil,
+ 		},
+diff --git a/src/raft/fsm.go b/src/raft/fsm.go
+index 3164966..3a74715 100644
+--- a/src/raft/fsm.go
++++ b/src/raft/fsm.go
+@@ -15,7 +15,7 @@ type FSM interface {
+ 	// It returns a value which will be made available in the
+ 	// ApplyFuture returned by Raft.Apply method if that
+ 	// method was called on the same Raft node as the FSM.
+-	Apply(*Log) (interface{}, []func() [][]byte)
++	Apply(*Log) interface{}
+ 
+ 	// Snapshot is used to support log compaction. This call should
+ 	// return an FSMSnapshot which can be used to save a point-in-time
+@@ -51,22 +51,21 @@ func (r *Raft) runFSM() {
+ 
+ 	commit := func(req *commitTuple) {
+ 		// Apply the log if a command
+-        var resp interface{}
+-        var callback []func() [][]byte
++		var resp interface{}
+ 		if req.log.Type == LogCommand {
+-			start := time.Now()
+-            resp, callback = r.fsm.Apply(req.log)
+-			metrics.MeasureSince([]string{"raft", "fsm", "apply"}, start)
++			r.applyCommandLocally(req.log, &resp)
+ 		}
+ 
+ 		// Update the indexes
+-		lastIndex = req.log.Index
+-		lastTerm = req.log.Term
++		// Need to take max because could have gotten stale client request that is replayed.
++		if req.log.Index > lastIndex || req.log.Term > lastTerm {
++			lastIndex = req.log.Index
++			lastTerm = req.log.Term
++		}
+ 
+ 		// Invoke the future if given
+ 		if req.future != nil {
+ 			req.future.response = resp
+-            req.future.callback = callback
+ 			req.future.respond(nil)
+ 		}
+ 	}
+@@ -136,3 +135,32 @@ func (r *Raft) runFSM() {
+ 		}
+ 	}
+ }
++
++// Apply a command to the local FSM. Ensures exactly-once semantics with RIFL.
++// Params:
++//   - log: Log entry to apply locally. Should be of type LogCommand.
++//   - resp: Response object to populate after executing command.
++func (r *Raft) applyCommandLocally(log *Log, resp *interface{}) {
++	r.clientResponseLock.Lock()
++	clientCache, clientIdKnown := r.clientResponseCache[log.ClientID]
++	if !clientIdKnown {
++		r.clientResponseCache[log.ClientID] = make(map[uint64]clientResponseEntry)
++		clientCache = r.clientResponseCache[log.ClientID]
++	}
++	cachedResp, duplicateReq := clientCache[log.SeqNo]
++	if duplicateReq {
++		r.logger.Printf("found cached response for client %v with seqno %v with resp %v", log.ClientID, log.SeqNo, cachedResp.response)
++		*resp = cachedResp.response
++	} else {
++		start := time.Now()
++		*resp = r.fsm.Apply(log)
++		metrics.MeasureSince([]string{"raft", "fsm", "apply"}, start)
++		// Add response to clientResponseCache.
++		clientCache[log.SeqNo] = clientResponseEntry{
++			response:  *resp,
++			timestamp: time.Now(),
++		}
++		r.clientResponseCache[log.ClientID] = clientCache
++	}
++	r.clientResponseLock.Unlock()
++}
+diff --git a/src/raft/future.go b/src/raft/future.go
+index 9d4b228..fac59a5 100644
+--- a/src/raft/future.go
++++ b/src/raft/future.go
+@@ -36,7 +36,6 @@ type ApplyFuture interface {
+ 	// by the FSM.Apply method. This must not be called
+ 	// until after the Error method has returned.
+ 	Response() interface{}
+-    Callback() []func() [][]byte
+ }
+ 
+ // ConfigurationFuture is used for GetConfiguration and can return the
+@@ -76,10 +75,6 @@ func (e errorFuture) Index() uint64 {
+ 	return 0
+ }
+ 
+-func (e errorFuture) Callback() []func() [][]byte {
+-    return nil
+-}
+-
+ // deferError can be embedded to allow a future
+ // to provide an error in the future.
+ type deferError struct {
+@@ -142,7 +137,6 @@ type logFuture struct {
+ 	log      Log
+ 	response interface{}
+ 	dispatch time.Time
+-    callback []func() [][]byte
+ }
+ 
+ func (l *logFuture) Response() interface{} {
+@@ -153,10 +147,6 @@ func (l *logFuture) Index() uint64 {
+ 	return l.log.Index
+ }
+ 
+-func (l *logFuture) Callback() []func() [][]byte {
+-    return l.callback
+-}
+-
+ type shutdownFuture struct {
+ 	raft *Raft
+ }
+@@ -284,7 +274,6 @@ type appendFuture struct {
+ 	start time.Time
+ 	args  *AppendEntriesRequest
+ 	resp  *AppendEntriesResponse
+-    callback []func() [][]byte
+ }
+ 
+ func (a *appendFuture) Start() time.Time {
+@@ -298,7 +287,3 @@ func (a *appendFuture) Request() *AppendEntriesRequest {
+ func (a *appendFuture) Response() *AppendEntriesResponse {
+ 	return a.resp
+ }
+-
+-func (a *appendFuture) Callback() []func() [][]byte {
+-    return a.callback
+-}
+diff --git a/src/raft/inmem_snapshot.go b/src/raft/inmem_snapshot.go
+index 3aa92b3..63e0aa6 100644
+--- a/src/raft/inmem_snapshot.go
++++ b/src/raft/inmem_snapshot.go
+@@ -33,7 +33,7 @@ func NewInmemSnapshotStore() *InmemSnapshotStore {
+ 
+ // Create replaces the stored snapshot with a new one using the given args
+ func (m *InmemSnapshotStore) Create(version SnapshotVersion, index, term uint64,
+-	configuration Configuration, configurationIndex uint64, trans Transport) (SnapshotSink, error) {
++	configuration Configuration, configurationIndex uint64, nextClientId uint64, clientResponseCache map[uint64]map[uint64]clientResponseEntry, trans Transport) (SnapshotSink, error) {
+ 	// We only support version 1 snapshots at this time.
+ 	if version != 1 {
+ 		return nil, fmt.Errorf("unsupported snapshot version %d", version)
+@@ -46,13 +46,15 @@ func (m *InmemSnapshotStore) Create(version SnapshotVersion, index, term uint64,
+ 
+ 	sink := &InmemSnapshotSink{
+ 		meta: SnapshotMeta{
+-			Version:            version,
+-			ID:                 name,
+-			Index:              index,
+-			Term:               term,
+-			Peers:              encodePeers(configuration, trans),
+-			Configuration:      configuration,
+-			ConfigurationIndex: configurationIndex,
++			Version:             version,
++			ID:                  name,
++			Index:               index,
++			Term:                term,
++			NextClientId:        nextClientId,
++			ClientResponseCache: clientResponseCache,
++			Peers:               encodePeers(configuration, trans),
++			Configuration:       configuration,
++			ConfigurationIndex:  configurationIndex,
+ 		},
+ 		contents: &bytes.Buffer{},
+ 	}
+diff --git a/src/raft/log.go b/src/raft/log.go
+index 4ade38e..de8cab3 100644
+--- a/src/raft/log.go
++++ b/src/raft/log.go
+@@ -31,6 +31,9 @@ const (
+ 	// created when a server is added, removed, promoted, etc. Only used
+ 	// when protocol version 1 or greater is in use.
+ 	LogConfiguration
++
++	// LogNextClientId is used to set the next client ID across the cluster.
++	LogNextClientId
+ )
+ 
+ // Log entries are replicated to all members of the Raft cluster
+@@ -47,8 +50,20 @@ type Log struct {
+ 
+ 	// Data holds the log entry's type-specific data.
+ 	Data []byte
++
++	// Client ID. Only used for LogCommand.
++	ClientID uint64
++
++	// Sequence number of command. Only used for LogCommand.
++	SeqNo uint64
++
++	// Keys associated with RPC, used to check for commutativity.
++	Keys []Key
+ }
+ 
++// Used to check for operations that conflict in commutativity checks.
++type Key []byte
++
+ // LogStore is used to provide an interface for storing
+ // and retrieving logs in a durable fashion.
+ type LogStore interface {
+diff --git a/src/raft/net_transport.go b/src/raft/net_transport.go
+index a918438..6ccb519 100644
+--- a/src/raft/net_transport.go
++++ b/src/raft/net_transport.go
+@@ -18,8 +18,14 @@ const (
+ 	rpcAppendEntries uint8 = iota
+ 	rpcRequestVote
+ 	rpcInstallSnapshot
+-    rpcClientRequest
+-    rpcClientResponse
++	rpcClientRequest
++	rpcClientResponse
++	rpcClientIdRequest
++	rpcClientIdResponse
++	rpcRecordRequest
++	rpcRecordResponse
++	rpcSyncRequest
++	rpcSyncResponse
+ 
+ 	// DefaultTimeoutScale is the default TimeoutScale in a NetworkTransport.
+ 	DefaultTimeoutScale = 256 * 1024 // 256KB
+@@ -254,7 +260,7 @@ func (n *NetworkTransport) getPooledConn(target ServerAddress) *netConn {
+ // getConnFromAddressProvider returns a connection from the server address provider if available, or defaults to a connection using the target server address
+ func (n *NetworkTransport) getConnFromAddressProvider(id ServerID, target ServerAddress) (*netConn, error) {
+ 	address := n.getProviderAddressOrFallback(id, target)
+-    return n.getConn(address)
++	return n.getConn(address)
+ }
+ 
+ func (n *NetworkTransport) getProviderAddressOrFallback(id ServerID, target ServerAddress) ServerAddress {
+@@ -414,11 +420,11 @@ func (n *NetworkTransport) DecodePeer(buf []byte) ServerAddress {
+ // listen is used to handling incoming connections.
+ func (n *NetworkTransport) listen() {
+ 	for {
+-        // Accept incoming connections
++		// Accept incoming connections
+ 		conn, err := n.stream.Accept()
+-        if err != nil {
++		if err != nil {
+ 			if n.IsShutdown() {
+-                n.logger.Printf("Shutting down")
++				n.logger.Printf("Shutting down")
+ 				return
+ 			}
+ 			n.logger.Printf("[ERR] raft-net: Failed to accept connection: %v", err)
+@@ -455,7 +461,7 @@ func (n *NetworkTransport) handleConn(conn net.Conn) {
+ 
+ // handleCommand is used to decode and dispatch a single command.
+ func (n *NetworkTransport) handleCommand(r *bufio.Reader, dec *codec.Decoder, enc *codec.Encoder) error {
+-    // Get the rpc type
++	// Get the rpc type
+ 	rpcType, err := r.ReadByte()
+ 	if err != nil {
+ 		return err
+@@ -499,12 +505,33 @@ func (n *NetworkTransport) handleCommand(r *bufio.Reader, dec *codec.Decoder, en
+ 		rpc.Command = &req
+ 		rpc.Reader = io.LimitReader(r, req.Size)
+ 
+-    case rpcClientRequest:
+-        var req ClientRequest
+-        if err := dec.Decode(&req); err != nil {
+-            return err
+-        }
+-        rpc.Command = &req
++	case rpcSyncRequest:
++		var req SyncRequest
++		if err := dec.Decode(&req); err != nil {
++			return err
++		}
++		rpc.Command = &req
++
++	case rpcRecordRequest:
++		var req RecordRequest
++		if err := dec.Decode(&req); err != nil {
++			return err
++		}
++		rpc.Command = &req
++
++	case rpcClientRequest:
++		var req ClientRequest
++		if err := dec.Decode(&req); err != nil {
++			return err
++		}
++		rpc.Command = &req
++
++	case rpcClientIdRequest:
++		var req ClientIdRequest
++		if err := dec.Decode(&req); err != nil {
++			return err
++		}
++		rpc.Command = &req
+ 
+ 	default:
+ 		return fmt.Errorf("unknown rpc type %d", rpcType)
+@@ -512,7 +539,7 @@ func (n *NetworkTransport) handleCommand(r *bufio.Reader, dec *codec.Decoder, en
+ 
+ 	// Check for heartbeat fast-path
+ 	if isHeartbeat {
+-        n.heartbeatFnLock.Lock()
++		n.heartbeatFnLock.Lock()
+ 		fn := n.heartbeatFn
+ 		n.heartbeatFnLock.Unlock()
+ 		if fn != nil {
+@@ -578,7 +605,7 @@ func decodeResponse(conn *netConn, resp interface{}) (bool, error) {
+ func sendRPC(conn *netConn, rpcType uint8, args interface{}) error {
+ 	// Write the request type
+ 	if err := conn.w.WriteByte(rpcType); err != nil {
+-        conn.Release()
++		conn.Release()
+ 		return err
+ 	}
+ 
+@@ -589,8 +616,8 @@ func sendRPC(conn *netConn, rpcType uint8, args interface{}) error {
+ 	}
+ 
+ 	// Flush
+-    if err := conn.w.Flush(); err != nil {
+-        conn.Release()
++	if err := conn.w.Flush(); err != nil {
++		conn.Release()
+ 		return err
+ 	}
+ 	return nil
+diff --git a/src/raft/raft.go b/src/raft/raft.go
+index 230e224..bdc6108 100644
+--- a/src/raft/raft.go
++++ b/src/raft/raft.go
+@@ -3,13 +3,13 @@ package raft
+ import (
+ 	"bytes"
+ 	"container/list"
++	"encoding/json"
+ 	"fmt"
++	"github.com/armon/go-metrics"
+ 	"io"
+ 	"io/ioutil"
++	"sync"
+ 	"time"
+-    "encoding/json"
+-	"github.com/armon/go-metrics"
+-    "sync"
+ )
+ 
+ const (
+@@ -76,12 +76,6 @@ type commitTuple struct {
+ 	future *logFuture
+ }
+ 
+-type clientSession struct {
+-    lastContact         time.Time
+-    heartbeatCh         chan bool
+-    endSessionCommand   []byte
+-}
+-
+ // leaderState is state that is used while we are a leader.
+ type leaderState struct {
+ 	commitCh   chan struct{}
+@@ -90,8 +84,21 @@ type leaderState struct {
+ 	replState  map[ServerID]*followerReplication
+ 	notify     map[*verifyFuture]struct{}
+ 	stepDown   chan struct{}
+-    clientSessions  map[ServerAddress]*clientSession
+-    clientSessionsLock  sync.RWMutex
++}
++
++// Tuple used to uniquely identify RPC using RIFL.
++type ClientSeqNo struct {
++	// Identifies unique client.
++	ClientID uint64
++	// Identifies unique RPC from a client.
++	SeqNo uint64
++}
++
++// witnessState is state for maintaining records as a witness.
++type witnessState struct {
++	keys    map[*Key]bool
++	records map[*ClientSeqNo]*Log
++	lock    sync.RWMutex
+ }
+ 
+ // setLeader is used to modify the current leader of the cluster
+@@ -182,7 +189,7 @@ func (r *Raft) runFollower() {
+ 			b.respond(r.liveBootstrap(b.configuration))
+ 
+ 		case <-heartbeatTimer:
+-            // Restart the heartbeat timer
++			// Restart the heartbeat timer
+ 			heartbeatTimer = randomTimeout(r.conf.HeartbeatTimeout)
+ 
+ 			// Check if we have had a successful contact
+@@ -346,7 +353,6 @@ func (r *Raft) runLeader() {
+ 	r.leaderState.replState = make(map[ServerID]*followerReplication)
+ 	r.leaderState.notify = make(map[*verifyFuture]struct{})
+ 	r.leaderState.stepDown = make(chan struct{}, 1)
+-    r.leaderState.clientSessions = make(map[ServerAddress]*clientSession)
+ 
+ 	// Cleanup state on step down
+ 	defer func() {
+@@ -512,7 +518,7 @@ func (r *Raft) leaderLoop() {
+ 
+ 		case <-r.leaderState.commitCh:
+ 			// Process the newly committed entries
+-            oldCommitIndex := r.getCommitIndex()
++			oldCommitIndex := r.getCommitIndex()
+ 			commitIndex := r.leaderState.commitment.getCommitIndex()
+ 			r.setCommitIndex(commitIndex)
+ 
+@@ -755,7 +761,7 @@ func (r *Raft) restoreUserSnapshot(meta *SnapshotMeta, reader io.Reader) error {
+ 	// Dump the snapshot. Note that we use the latest configuration,
+ 	// not the one that came with the snapshot.
+ 	sink, err := r.snapshots.Create(version, lastIndex, term,
+-		r.configurations.latest, r.configurations.latestIndex, r.trans)
++		r.configurations.latest, r.configurations.latestIndex, r.nextClientId, r.clientResponseCache, r.trans)
+ 	if err != nil {
+ 		return fmt.Errorf("failed to create snapshot: %v", err)
+ 	}
+@@ -842,7 +848,7 @@ func (r *Raft) appendConfigurationEntry(future *configurationChangeFuture) {
+ // dispatchLog is called on the leader to push a log to disk, mark it
+ // as inflight and begin replication of it.
+ func (r *Raft) dispatchLogs(applyLogs []*logFuture) {
+-    now := time.Now()
++	now := time.Now()
+ 	defer metrics.MeasureSince([]string{"raft", "leader", "dispatchLog"}, now)
+ 
+ 	term := r.getCurrentTerm()
+@@ -915,7 +921,7 @@ func (r *Raft) processLogs(index uint64, future *logFuture) {
+ 
+ // processLog is invoked to process the application of a single committed log entry.
+ func (r *Raft) processLog(l *Log, future *logFuture) {
+-    switch l.Type {
++	switch l.Type {
+ 	case LogBarrier:
+ 		// Barrier is handled by the FSM
+ 		fallthrough
+@@ -930,10 +936,26 @@ func (r *Raft) processLog(l *Log, future *logFuture) {
+ 			}
+ 		}
+ 
++		// Garbage collect at witnesses.
++		clientSeqNo := &ClientSeqNo{
++			ClientID: l.ClientID,
++			SeqNo:    l.SeqNo,
++		}
++		r.witnessState.lock.Lock()
++		delete(r.witnessState.records, clientSeqNo)
++		r.witnessState.lock.Unlock()
++
+ 		// Return so that the future is only responded to
+ 		// by the FSM handler when the application is done
+ 		return
+ 
++	case LogNextClientId:
++		var nextClientId uint64
++		if err := decodeMsgPack(l.Data, &nextClientId); err != nil {
++			panic(fmt.Errorf("failed to decode next cliend id: %v", err))
++		}
++		r.nextClientId = nextClientId
++
+ 	case LogConfiguration:
+ 	case LogAddPeerDeprecated:
+ 	case LogRemovePeerDeprecated:
+@@ -958,16 +980,22 @@ func (r *Raft) processRPC(rpc RPC) {
+ 		return
+ 	}
+ 
+-    switch cmd := rpc.Command.(type) {
++	switch cmd := rpc.Command.(type) {
+ 	case *AppendEntriesRequest:
+ 		r.appendEntries(rpc, cmd)
+ 	case *RequestVoteRequest:
+ 		r.requestVote(rpc, cmd)
+ 	case *InstallSnapshotRequest:
+ 		r.installSnapshot(rpc, cmd)
+-    case *ClientRequest:
+-        r.clientRequest(rpc, cmd)
+-    default:
++	case *RecordRequest:
++		r.recordRequest(rpc, cmd)
++	case *SyncRequest:
++		r.syncRequest(rpc, cmd)
++	case *ClientRequest:
++		r.clientRequest(rpc, cmd)
++	case *ClientIdRequest:
++		r.clientIdRequest(rpc, cmd)
++	default:
+ 		r.logger.Printf("[ERR] raft: Got unexpected command: %#v", rpc.Command)
+ 		rpc.Respond(nil, fmt.Errorf("unexpected command"))
+ 	}
+@@ -1291,7 +1319,7 @@ func (r *Raft) installSnapshot(rpc RPC, req *InstallSnapshotRequest) {
+ 	}
+ 	version := getSnapshotVersion(r.protocolVersion)
+ 	sink, err := r.snapshots.Create(version, req.LastLogIndex, req.LastLogTerm,
+-		reqConfiguration, reqConfigurationIndex, r.trans)
++		reqConfiguration, reqConfigurationIndex, r.nextClientId, r.clientResponseCache, r.trans)
+ 	if err != nil {
+ 		r.logger.Printf("[ERR] raft: Failed to create snapshot to install: %v", err)
+ 		rpcErr = fmt.Errorf("failed to create snapshot: %v", err)
+@@ -1363,105 +1391,221 @@ func (r *Raft) installSnapshot(rpc RPC, req *InstallSnapshotRequest) {
+ 	return
+ }
+ 
+-// Handle a clientRequest RPC from client.
++// Handle a clientIdRequest from client. Can only be handled at
++// the leader. Assigns a new client ID and replicates the client
++// ID to followers.
++// Params:
++//   - rpc: RPC object used to send a response.
++//   - c: Client Id Request being handled.
++func (r *Raft) clientIdRequest(rpc RPC, c *ClientIdRequest) {
++	leader := r.Leader()
++	resp := &ClientIdResponse{
++		LeaderAddress: leader,
++	}
++	// Can only assign client IDs at the leader.
++	if r.getState() == Leader {
++		resp.ClientID = r.nextClientId
++		r.nextClientId += 1
++		r.clientResponseLock.Lock()
++		r.clientResponseCache[resp.ClientID] = make(map[uint64]clientResponseEntry)
++		r.clientResponseLock.Unlock()
++		r.logger.Printf("Client ID to send is %v", r.nextClientId)
++		go func(r *Raft, resp *ClientIdResponse, rpc RPC) {
++			f := r.SendNextClientId(0)
++			if f.Error() != nil {
++				r.logger.Printf("err :%v", f.Error())
++			}
++			rpc.Respond(resp, f.Error())
++		}(r, resp, rpc)
++	} else {
++		rpc.Respond(resp, ErrNotLeader)
++	}
++}
++
++// Handle a syncRequest from client. Can only be handled at the
++// leader, and required a valid client ID. Synchronously 
++// executes the client command.
++// Params:
++//   - rpc: RPC object used to send a response
++//   - sync: Sync Request being handled.
++func (r *Raft) syncRequest(rpc RPC, sync *SyncRequest) {
++	r.logger.Printf("Tried to sync, not implemented yet")
++	leader := r.Leader()
++	resp := &SyncResponse{
++		Success:       false,
++		LeaderAddress: leader,
++	}
++	// Check if client ID is valid.
++	r.clientResponseLock.RLock()
++	_, ok := r.clientResponseCache[sync.Entry.ClientID]
++	r.clientResponseLock.RUnlock()
++	if !ok {
++		rpc.Respond(resp, ErrBadClientId)
++		return
++	}
++	// Check if request has already been made.
++	// Have we contacted the leader?
++	if r.getState() == Leader {
++		// Apply all commands in client request.
++		r.goFunc(func() {
++			var rpcErr error
++			r.applySynchronousCommand(sync.Entry, resp, &rpcErr)
++			rpc.Respond(resp, rpcErr)
++		})
++	} else {
++		resp.Success = false
++		rpc.Respond(resp, ErrNotLeader)
++	}
++}
++
++// Handle a recordRequest from client. Can only be handled
++// at a witness, not the leader. Records an operation successfully
++// if it is commutative with other stored operations.
++func (r *Raft) recordRequest(rpc RPC, record *RecordRequest) {
++	// Master can't act as a witness.
++	if r.getState() == Leader {
++		resp := &RecordResponse{
++			Success: false,
++		}
++		rpc.Respond(resp, ErrNotWitness)
++		return
++	}
++
++	success := r.storeIfCommutative(record.Entry)
++	r.logger.Printf("witness says client req is commutative: %b", success)
++	// Respond to client.
++	resp := &RecordResponse{
++		Success: success,
++	}
++
++	if success {
++		rpc.Respond(resp, nil)
++	} else {
++		rpc.Respond(resp, ErrNotCommutative)
++	}
++}
++
++
++// Check if an operation is commutative with other operations
++// stored at the witness and if this is the case, store it and
++// return true, otherwise return false.
++// Params:
++//   - log: Log entry of type LogCommand to store.
++// Return true if successfully stored (must be commutative with
++// other operations, false otherwise.
++func (r *Raft) storeIfCommutative(log *Log) bool {
++	r.witnessState.lock.Lock()
++	defer r.witnessState.lock.Unlock()
++
++	// Check if operation involving key already stored at witness.
++	for _, key := range log.Keys {
++		if _, ok := r.witnessState.keys[&key]; ok {
++			return false
++		}
++	}
++
++	// Add keys separately in case keys included multiple times by client.
++	for _, key := range log.Keys {
++		r.witnessState.keys[&key] = true
++	}
++	// Record RPC in witness.
++	clientSeqNo := &ClientSeqNo{
++		ClientID: log.ClientID,
++		SeqNo:    log.SeqNo,
++	}
++	r.witnessState.records[clientSeqNo] = log
++
++	return true
++}
++
++// Handle a clientRequest RPC from client. Can only be handled at
++// the leader. Requires a valid client ID. Only executes locally
++// and reports not synced if commutative, otherwise replicates
++// synchronously to followers and reports synced.
++// Params:
++//   - rpc: RPC object used to send a response.
++//   - c: Client Request object being handled.
+ func (r *Raft) clientRequest(rpc RPC, c *ClientRequest) {
+-    leader := r.Leader()
+-    resp := &ClientResponse{
+-        Success : false,
+-        LeaderAddress : leader,
+-    }
+-    // Have we contacted the leader?
+-    var rpcErr error
+-    if (r.getState() == Leader) {
+-        // Maintain sessions
+-        if (c.KeepSession) {
+-            r.leaderState.clientSessionsLock.RLock()
+-            _, ok := r.leaderState.clientSessions[c.ClientAddr]
+-            r.leaderState.clientSessionsLock.RUnlock()
+-            // If first session, start heartbeat loop.
+-            if c.EndSessionCommand != nil {
+-                if !ok {
+-                    r.leaderState.clientSessionsLock.Lock()
+-                    r.leaderState.clientSessions[c.ClientAddr] = &clientSession{}
+-                    r.leaderState.clientSessions[c.ClientAddr].heartbeatCh = make (chan bool, 1)
+-                    r.leaderState.clientSessions[c.ClientAddr].endSessionCommand = c.EndSessionCommand
+-                    r.leaderState.clientSessionsLock.Unlock()
+-                    go r.clientSessionHeartbeatLoop(c.ClientAddr)
+-                }
+-                r.leaderState.clientSessionsLock.RLock()
+-                ch := r.leaderState.clientSessions[c.ClientAddr].heartbeatCh
+-                r.leaderState.clientSessionsLock.RUnlock()
+-                ch <- true
+-            }
+-        }
+-        // Apply all commands in client request.
+-        go func(r *Raft, resp *ClientResponse, rpc RPC, c *ClientRequest) {
+-            var rpcErr error
+-            for _,entry := range(c.Entries) {
+-                if (entry != nil) {
+-                    r.applyCommand(entry.Data, resp, &rpcErr)
+-                }
+-            }
+-            rpc.Respond(resp, rpcErr)
+-        }(r, resp, rpc, c)
+-    } else {
+-        rpcErr = ErrNotLeader
+-        resp.Success = false
+-        rpc.Respond(resp, rpcErr)
+-    }
++	leader := r.Leader()
++	resp := &ClientResponse{
++		Success:       false,
++		LeaderAddress: leader,
++	}
++	// Check if client ID is valid.
++	r.clientResponseLock.RLock()
++	_, ok := r.clientResponseCache[c.Entry.ClientID]
++	r.clientResponseLock.RUnlock()
++	if !ok {
++		rpc.Respond(resp, ErrBadClientId)
++		return
++	}
++	// Check if request has already been made.
++	// Have we contacted the leader?
++	if r.getState() == Leader {
++		// Apply all commands in client request.
++		r.goFunc(func() {
++			var rpcErr error
++			r.applyCommand(c.Entry, resp, &rpcErr)
++			rpc.Respond(resp, rpcErr)
++		})
++	} else {
++		resp.Success = false
++		rpc.Respond(resp, ErrNotLeader)
++	}
++}
++
++
++// Apply a command locally if it is commutative (not synced) or
++// replicate to followers (synced). Sets fields in resp based on
++// execution of request and if synced.
++// Params:
++//   - log: Log entry to apply, type LogCommand.
++//   - resp: Response to populate after completing command.
++//   - rpcErr: Pointer to error to set if necessary.
++func (r *Raft) applyCommand(log *Log, resp *ClientResponse, rpcErr *error) {
++	commutative := r.storeIfCommutative(log)
++	if commutative {
++		// Apply locally, store in witness cache, and respond
++		r.applyCommutativeCommand(log, resp, rpcErr)
++		resp.Synced = false
++	} else {
++		// Sync all previous requests and execute this request synchronously.
++		r.applySynchronousCommand(log, resp, rpcErr)
++		resp.Synced = true
++	}
+ }
+ 
+-// Apply a command from leader to all raft FSMs. */
+-func (r *Raft) applyCommand(command []byte, resp *ClientResponse, rpcErr *error) {
+-    f := r.Apply(command, 0)
+-    if f.Error() != nil {
+-        r.logger.Printf("err: %v",f.Error())
+-        *rpcErr = f.Error()
+-        resp.Success = false
+-    }
+-    /* If callback, make leader execute callback */
+-    var nextCommands [][]byte
+-    callbacks := f.Callback()
+-    for _,callback := range callbacks {
+-        commands := callback()
+-        for _, command := range commands {
+-            nextCommands = append(nextCommands, command)
+-        }
+-    }
+-    data, _:= json.Marshal(f.Response())
+-    resp.ResponseData = data
+-    resp.Success = true
+-    for _,nextCommand := range nextCommands {
+-        r.applyCommand(nextCommand, resp, rpcErr)
+-    }
++// Apply a command locally. Should only be called by the leader if
++// the leader has confirmed that the operation is commutative and
++// is stored in its set of current operations.
++// Params:
++//   - log: Log entry to apply commutatively, type LogCommand.
++//   - resp: Response to populate after completing command.
++//   - rpcErr: Pointer to error to set if necessary.
++func (r *Raft) applyCommutativeCommand(log *Log, resp ClientOperationResponse, rpcErr *error) {
++	// Apply locally, store in witness cache, and respond
++	var response interface{}
++	r.applyCommandLocally(log, &response)
++	data, _ := json.Marshal(response)
++	resp.ConstructResponse(data, true, r.Leader())
++	// Replicate to client asynchronously
++	r.goFunc(func() { r.Apply(log, 0) })
+ }
+ 
+-/* Manage a client session. */
+-func (r *Raft) clientSessionHeartbeatLoop(clientAddr ServerAddress) {
+-    r.leaderState.clientSessionsLock.RLock()
+-    ch := r.leaderState.clientSessions[clientAddr].heartbeatCh
+-    r.leaderState.clientSessionsLock.RUnlock()
+-    for {
+-        select {
+-        case <- ch:
+-            r.leaderState.clientSessionsLock.Lock()
+-            r.leaderState.clientSessions[clientAddr].lastContact = time.Now()
+-            r.leaderState.clientSessionsLock.Unlock()
+-        case <- time.After(30*time.Second):
+-            r.logger.Printf("ending client session")
+-            var err error
+-            r.leaderState.clientSessionsLock.RLock()
+-            command := r.leaderState.clientSessions[clientAddr].endSessionCommand
+-            r.leaderState.clientSessionsLock.RUnlock()
+-            if command != nil {
+-                r.applyCommand(command, &ClientResponse{}, &err)
+-            }
+-            r.leaderState.clientSessionsLock.Lock()
+-            delete(r.leaderState.clientSessions, clientAddr)
+-            r.leaderState.clientSessionsLock.Unlock()
+-            return
+-        }
+-    }
++// Replicate a command to followers. Should be called if leader has
++// confirmed that an operation is not commutative.
++// Params: 
++//   - log: Log entry to apply commutatively, type LogCommand.
++//   - resp: Response to populate after completing command.
++//   - rpcErr: Pointer to error to set if necessary.
++func (r *Raft) applySynchronousCommand(log *Log, resp ClientOperationResponse, rpcErr *error) {
++	f := r.Apply(log, 0)
++	if f.Error() != nil {
++		r.logger.Printf("err: %v", f.Error())
++		*rpcErr = f.Error()
++	}
++	data, _ := json.Marshal(f.Response())
++	resp.ConstructResponse(data, true, r.Leader())
+ }
+ 
+ // setLastContact is used to set the last contact time to now
+diff --git a/src/raft/replication.go b/src/raft/replication.go
+index 2b5ec47..e631b5a 100644
+--- a/src/raft/replication.go
++++ b/src/raft/replication.go
+@@ -182,7 +182,7 @@ START:
+ 	}
+ 
+ 	// Make the RPC call
+-    start = time.Now()
++	start = time.Now()
+ 	if err := r.trans.AppendEntries(s.peer.ID, s.peer.Address, &req, &resp); err != nil {
+ 		r.logger.Printf("[ERR] raft: Failed to AppendEntries to %v: %v", s.peer, err)
+ 		s.failures++
+@@ -337,7 +337,7 @@ func (r *Raft) heartbeat(s *followerReplication, stopCh chan struct{}) {
+ 	var resp AppendEntriesResponse
+ 	for {
+ 		// Wait for the next heartbeat interval or forced notify
+-        select {
++		select {
+ 		case <-s.notifyCh:
+ 		case <-randomTimeout(r.conf.HeartbeatTimeout / 10):
+ 		case <-stopCh:
+diff --git a/src/raft/session.go b/src/raft/session.go
+index 2355dce..ef6b842 100644
+--- a/src/raft/session.go
++++ b/src/raft/session.go
+@@ -1,271 +1,316 @@
+ package raft
+ 
+ import (
+-    "net"
+-    "time"
+-    "fmt"
+-    "errors"
+-    "bufio"
+-
+-    "github.com/hashicorp/go-msgpack/codec"
++	"errors"
++	"sync"
++	"time"
+ )
+ 
+-type Session struct {
+-    trans               *NetworkTransport
+-    currConn            *netConn
+-    raftServers         []ServerAddress
+-    stopCh              chan bool
+-    active              bool
+-    endSessionCommand   []byte
++// Client library for Raft. Provides session abstraction that handles starting
++// a session, making requests, and closing a session.
++
++// Connection and associated lock for synchronization.
++type syncedConn struct {
++	// Connection to Raft server.
++	conn *netConn
++	// Lock protecting conn.
++	lock sync.Mutex
+ }
+ 
+-// Send request to cluster without using session.
+-func SendSingletonRequestToCluster(addrs []ServerAddress, data []byte, resp *ClientResponse) error {
+-    if resp == nil {
+-        return errors.New("Response is nil")
+-    }
+-    // Send RPC
+-    clientRequest := ClientRequest{
+-        RPCHeader: RPCHeader{
+-            ProtocolVersion: ProtocolVersionMax,
+-        },
+-        Entries: []*Log{
+-            &Log{
+-                Type: LogCommand,
+-                Data: data,
+-            },
+-        },
+-    }
+-    return sendSingletonRpcToActiveLeader(addrs, &clientRequest, resp)
++// Session abstraction used to make requests to Raft cluster.
++type Session struct {
++	// Client network layer.
++	trans *NetworkTransport
++	// Connections to all Raft nodes.
++	conns []syncedConn
++	// Leader is index into conns or addrs arrays.
++	leader     int
++	leaderLock sync.RWMutex
++	// Addresses of all Raft servers.
++	addrs []ServerAddress
++	// Client ID assigned by cluster for use in RIFL.
++	clientID uint64
++	// Sequence number of next RPC for use in RIFL.
++	rpcSeqNo uint64
+ }
+ 
++// Open client session to cluster.
++// Params:
++//   - trans: Client transport layer for networking opertaions
++//   - addrs: Addresses of all Raft servers
++// Return: created session
++func CreateClientSession(trans *NetworkTransport, addrs []ServerAddress) (*Session, error) {
++	session := &Session{
++		trans:    trans,
++		conns:    make([]syncedConn, len(addrs)),
++		leader:   -1,
++		addrs:    addrs,
++		rpcSeqNo: 0,
++	}
+ 
+-/* Open client session to cluster. Takes clientID, server addresses for all servers in cluster, and returns success or failure.
+-   Start go routine to periodically send heartbeat messages and switch to new leader when necessary. */ 
+-func CreateClientSession(trans *NetworkTransport, addrs []ServerAddress, endSessionCommand []byte) (*Session, error) {
+-    session := &Session{
+-        trans: trans,
+-        raftServers: addrs,
+-        active: true,
+-        stopCh : make(chan bool, 1),
+-        endSessionCommand: endSessionCommand,
+-    }
+-    var err error
+-    session.currConn, err = findActiveServerWithTrans(addrs, trans)
+-    if err != nil {
+-        return nil ,err
+-    }
+-    if endSessionCommand != nil {
+-       go session.sessionKeepAliveLoop()
+-    }
+-    return session, nil
+-}
++	// Initialize syncedConn array.
++	for i := range session.conns {
++		session.conns[i] = syncedConn{}
++	}
+ 
++	// Open connections to all raft servers.
++	var err error
++	for i, addr := range addrs {
++		session.conns[i].conn, err = trans.getConn(addr)
++		if err == nil {
++			session.leader = i
++		}
++	}
+ 
+-/* Make request to open session. */
+-func (s *Session) SendRequest(data []byte, resp *ClientResponse) error {
+-    if !s.active {
+-        return errors.New("Inactive client session.")
+-    }
+-    if resp == nil {
+-        return errors.New("Response is nil")
+-    }
+-    req := ClientRequest {
+-        RPCHeader: RPCHeader {
+-            ProtocolVersion: ProtocolVersionMax,
+-        },
+-        Entries: []*Log{
+-            &Log {
+-                Type: LogCommand,
+-                Data: data,
+-            },
+-        },
+-        ClientAddr: s.trans.LocalAddr(),
+-        EndSessionCommand: s.endSessionCommand,
+-        KeepSession: true,
+-    }
+-    return s.sendToActiveLeader(&req, resp)
+-}
++	// Report error if can't connect to any server.
++	if session.leader == -1 {
++		return nil, ErrNoActiveServers
++	}
+ 
++	// Get a client ID from the leader.
++	req := ClientIdRequest{
++		RPCHeader: RPCHeader{
++			ProtocolVersion: ProtocolVersionMax,
++		},
++	}
++	resp := ClientIdResponse{}
++	err = session.sendToActiveLeader(&req, &resp, rpcClientIdRequest)
++	if err != nil {
++		return nil, err
++	}
++	session.clientID = resp.ClientID
++	return session, nil
++}
+ 
+-/* Close client session. Kill heartbeat go routine. */
+-func (s *Session) CloseClientSession() error {
+-    if !s.active {
+-        return errors.New("Inactive client session")
+-    }
+-    s.stopCh <- true
+-    fmt.Println("closed client session")
+-    return nil
++// Make request to Raft cluster using open session.
++// Params:
++//   - data: client request to send to cluster
++//   - keys: array of keys that request updates, used in commutativity checks
++//   - resp: pointer to response that will be populated
++func (s *Session) SendRequest(data []byte, keys []Key, resp *ClientResponse) error {
++	seqNo := s.rpcSeqNo
++	s.rpcSeqNo++
++	return s.SendRequestWithSeqNo(data, keys, resp, seqNo)
+ }
+ 
+-/* Loop to send and receive heartbeat messages. */
+-func (s *Session) sessionKeepAliveLoop() {
+-    for s.active {
+-        select {
+-        case <-time.After(10*time.Second):
+-        case <- s.stopCh:
+-            s.active = false
+-        }
+-        if !s.active {
+-            fmt.Println("client session no longer active")
+-            return
+-        }
+-        // Send RPC
+-        heartbeat := ClientRequest{
+-          RPCHeader: RPCHeader{
+-              ProtocolVersion: ProtocolVersionMax,
+-          },
+-          Entries: nil,
+-          ClientAddr: s.trans.LocalAddr(),
+-          KeepSession: true,
+-          EndSessionCommand: s.endSessionCommand,
+-        }
+-        s.sendToActiveLeader(&heartbeat, &ClientResponse{})
+-    }
+-    fmt.Println("client session no longer active")
++// Make request to Raft cluster using open session and specifying a sequence
++// number. Only use for testing! (Use SendRequest in production).
++// Params:
++//   - data: client request to send to cluster
++//   - keys: array of keys that request updates, used in commutativity checks
++//   - resp: pointer to response that will be populated
++//   - seqno: sequence number to use for request (for testing purposes)
++func (s *Session) SendRequestWithSeqNo(data []byte, keys []Key, resp *ClientResponse, seqno uint64) error {
++	if resp == nil {
++		return errors.New("Response is nil")
++	}
++	req := ClientRequest{
++		RPCHeader: RPCHeader{
++			ProtocolVersion: ProtocolVersionMax,
++		},
++		Entry: &Log{
++			Type:     LogCommand,
++			Data:     data,
++			Keys:     keys,
++			ClientID: s.clientID,
++			SeqNo:    seqno,
++		},
++	}
++	return s.sendToActiveLeader(&req, resp, rpcClientRequest)
+ }
+ 
+-func (s *Session) sendToActiveLeader(request *ClientRequest, response *ClientResponse) error {
+-    var err error = errors.New("")
+-    retries := 5
+-    /* Send heartbeat to active leader. Connect to active leader if connection no longer to active leader. */
+-    for err != nil {
+-        if retries <= 0 {
+-            s.active = false
+-            return errors.New("Failed to find active leader.")
+-        }
+-        if s.currConn == nil {
+-            s.active = false
+-            return errors.New("No current connection.")
+-        }
+-        err = sendRPC(s.currConn, rpcClientRequest, request)
+-        /* Try another server if server went down. */
+-        for err != nil {
+-            if retries <= 0 {
+-                s.active = false
+-                return errors.New("Failed to find active leader.")
+-            }
+-            s.currConn, err = findActiveServerWithTrans(s.raftServers, s.trans)
+-            if err != nil || s.currConn == nil {
+-                s.active = false
+-                return errors.New("No active server found.")
+-            }
+-            retries--
+-            err = sendRPC(s.currConn, rpcClientRequest, request)
+-        }
+-        /* Decode response if necesary. Try new server to find leader if necessary. */
+-        if (s.currConn == nil) {
+-            return errors.New("Failed to find active leader.")
+-        }
+-        _, err = decodeResponse(s.currConn, &response)
+-        if err != nil {
+-            if response != nil && response.LeaderAddress != "" {
+-                s.currConn, _ = s.trans.getConn(response.LeaderAddress)
+-             } else {
+-                /* Wait for leader to be elected. */
+-                time.Sleep(1000*time.Millisecond)
+-            }
+-        }
+-        retries--
+-    }
+-    return nil
++// Close client session.
++// TODO: GC client request tables.
++func (s *Session) CloseClientSession() error {
++	return nil
+ }
+ 
+-func sendSingletonRpcToActiveLeader(addrs []ServerAddress, request *ClientRequest, response *ClientResponse) error {
+-    retries := 5 
+-    conn, err := findActiveServerWithoutTrans(addrs)
+-    if err != nil {
+-        return errors.New("No active server found.")
+-    }
+-    err = errors.New("")
+-    /* Send heartbeat to active leader. Connect to active leader if connection no longer to active leader. */
+-    for err != nil {
+-        if conn == nil {
+-            return errors.New("No current connection.")
+-        }
+-        if retries <= 0 {
+-            conn.conn.Close()
+-            return errors.New("Failed to find active leader.")
+-        }
+-        err = sendRPC(conn, rpcClientRequest, request)
+-        /* Try another server if server went down. */
+-        for err != nil {
+-            fmt.Println("error sending: ", err)
+-            if retries <= 0 {
+-                if conn != nil {
+-                    conn.conn.Close()
+-                }
+-                return errors.New("Failed to find active leader.")
+-            }
+-            conn, err = findActiveServerWithoutTrans(addrs)
+-            if err != nil || conn == nil {
+-                if conn != nil {
+-                    conn.conn.Close()
+-                }
+-                return errors.New("No active server found.")
+-            }
+-            retries--
+-            err = sendRPC(conn, rpcClientRequest, request)
+-        }
+-        /* Decode response if necesary. Try new server to find leader if necessary. */
+-        _, err = decodeResponse(conn, &response)
+-        if err != nil {
+-            if response.LeaderAddress != "" {
+-                conn, _ = buildNetConn(response.LeaderAddress)
+-             } else {
+-                 /* Wait for leader to be elcted. */
+-                 time.Sleep(1000*time.Millisecond)
+-            }
+-        }
+-        retries--
+-    }
+-    conn.conn.Close()
+-    return nil
++// Make request to Raft cluster following CURP protocol. Send to witnesses and
++// master simultaneously to complete in 1 RTT.
++// Params:
++//   - data: client request to send to cluster
++//   - keys: array of keys that request updates, used in commutativity checks
++//   - resp: pointer to response that will be populated
++//   - seqno: sequence number to use for request (for testing purposes)
++func (s *Session) SendFastRequest(data []byte, keys []Key, resp *ClientResponse) {
++	seqNo := s.rpcSeqNo
++	s.rpcSeqNo++
++	s.SendFastRequestWithSeqNo(data, keys, resp, seqNo)
+ }
+ 
+-func findActiveServerWithTrans(addrs []ServerAddress, trans *NetworkTransport) (*netConn, error) {
+-    for _, addr := range(addrs) {
+-        conn, err := trans.getConn(addr)
+-        if err == nil {
+-            return conn, nil
+-        }
+-    }
+-    return nil, errors.New("No active raft servers.")
++// Make request to Raft cluster following CURP protocol. Send to witnesses and
++// master simultaneously to complete in 1 RTT. Specify sequence number for testing
++// purposes. Only use SendFastRequest in production!
++// Params:
++//   - data: client request to send to cluster
++//   - keys: array of keys that request updates, used in commutativity checks
++//   - resp: pointer to response that will be populated
++//   - seqno: sequence number to use for request (for testing purposes)
++func (s *Session) SendFastRequestWithSeqNo(data []byte, keys []Key, resp *ClientResponse, seqNo uint64) {
++	req := ClientRequest{
++		RPCHeader: RPCHeader{
++			ProtocolVersion: ProtocolVersionMax,
++		},
++		Entry: &Log{
++			Type:     LogCommand,
++			Data:     data,
++			Keys:     keys,
++			ClientID: s.clientID,
++			SeqNo:    seqNo,
++		},
++	}
++
++	// Repeat until success.
++	// TODO: only retry limited number of times
++	for true {
++		resultCh := make(chan bool, len(s.addrs))
++		go func(s *Session, req *ClientRequest, resp *ClientResponse, resultCh *chan bool) {
++			err := s.sendToActiveLeader(req, resp, rpcClientRequest)
++			//fmt.Println("err sending to leader: ", err)
++			if err != nil {
++				*resultCh <- false
++			} else {
++				*resultCh <- true
++			}
++		}(s, &req, resp, &resultCh)
++		s.sendToAllWitnesses(req.Entry, &resultCh)
++
++		success := true
++
++		for i := 0; i <= len(s.addrs); i += 1 { // TODO: should this be len + 1?
++			result := <-resultCh
++			//fmt.Println("result is ", result)
++			success = success && result
++			// TODO: if synced, automatically succeed, otherwise if not success need to retry
++		}
++		if success || resp.Synced {
++			return
++		}
++		// If fail to record at witnesses and not synced, issue sync request.
++		sync := &SyncRequest{
++			RPCHeader: RPCHeader{
++				ProtocolVersion: ProtocolVersionMax,
++			},
++		}
++		var syncResp *SyncResponse
++		err := s.sendToActiveLeader(sync, syncResp, rpcSyncRequest)
++		if err == nil && syncResp.Success {
++			return
++		}
++		// Failed to sync. Try everything again
++	}
++
+ }
+ 
+-func findActiveServerWithoutTrans(addrs []ServerAddress) (*netConn, error) {
+-    for _, addr := range(addrs) {
+-        conn, err := buildNetConn(addr)
+-        if err == nil {
+-            return conn, nil
+-        }
+-        if conn != nil {
+-            conn.conn.Close()
+-        }
+-    }
+-    return nil, errors.New("No active raft servers.")
++// Send log entry to all witnesses in parallel and put results (success
++// or failure) into channel. Get all values from channel to ensure that
++// RPCs to witnesses have completed.
++// Params:
++//   - entry: Log entry to send to all witnesses.
++//   - resultCh: channel to put completion status into.
++func (s *Session) sendToAllWitnesses(entry *Log, resultCh *chan bool) {
++	req := &RecordRequest{
++		RPCHeader: RPCHeader{
++			ProtocolVersion: ProtocolVersionMax,
++		},
++		Entry: entry,
++	}
++
++	// Send to all witnesses.
++	for i := range s.conns {
++		go func(req *RecordRequest, resultCh *chan bool) {
++			*resultCh <- s.sendToWitness(i, req)
++		}(req, resultCh)
++	}
+ }
+ 
+-func buildNetConn(target ServerAddress) (*netConn, error) {
+-    // Dial a new connection
+-    conn, err := net.Dial("tcp", string(target))
++// Send request to a witness specified by id. Synchronous.
++// Params:
++//   - id: ID of witness sending request to
++//   - req: RecordRequest to send to witness
++// Returns: success or failure of RPC.
++func (s *Session) sendToWitness(id int, req *RecordRequest) bool {
++	var err error
++	s.conns[id].lock.Lock()
++	if s.conns[id].conn == nil {
++		s.conns[id].conn, err = s.trans.getConn(s.addrs[id])
++		if err != nil {
++			s.conns[id].lock.Unlock()
++			return false
++		}
++	}
++	err = sendRPC(s.conns[id].conn, rpcRecordRequest, req)
+ 	if err != nil {
+-        fmt.Println("error dialing: ", err)
+-        return nil, err
++		s.conns[id].lock.Unlock()
++		return false
+ 	}
+-
+-	// Wrap the conn
+-	netConn := &netConn{
+-		target: target,
+-		conn:   conn,
+-		r:      bufio.NewReader(conn),
+-		w:      bufio.NewWriter(conn),
++	resp := &RecordResponse{}
++	_, err = decodeResponse(s.conns[id].conn, resp)
++	s.conns[id].lock.Unlock()
++	if err != nil || !resp.Success {
++		return false
+ 	}
++	return true
++}
++
++// Send a RPC to the active leader. Try to use the currently cached active leader, and
++// if there is no cached leader or it is unreachable, try other Raft servers until a
++// leader is found. If no active Raft server is found, return an error.
++// Params:
++//   - request: JSON representation of request
++//   - response: client response that contains a leader address to help find an active leader
++//   - rpcType: type of RPC being sent.
++func (s *Session) sendToActiveLeader(request interface{}, response GenericClientResponse, rpcType uint8) error {
++	sendFailures := 0
++	var err error
++
++	s.leaderLock.Lock()
++	defer s.leaderLock.Unlock()
+ 
+-	// Setup encoder/decoders
+-	netConn.dec = codec.NewDecoder(netConn.r, &codec.MsgpackHandle{})
+-	netConn.enc = codec.NewEncoder(netConn.w, &codec.MsgpackHandle{})
++	// Continue trying to send until have tried contacting all servers.
++	for sendFailures < len(s.addrs) {
++		// If no open connection to guessed leader, try to open one.
++		s.conns[s.leader].lock.Lock()
++		if s.conns[s.leader].conn == nil {
++			s.conns[s.leader].conn, err = s.trans.getConn(s.addrs[s.leader])
++			if err != nil {
++				s.conns[s.leader].lock.Unlock()
++				sendFailures += 1
++				s.leader = (s.leader + 1) % len(s.conns)
++				continue
++			}
++		}
++		err = sendRPC(s.conns[s.leader].conn, rpcType, request)
++
++		// Failed to send RPC - try next server.
++		if err != nil {
++			s.conns[s.leader].lock.Unlock()
++			sendFailures += 1
++			s.leader = (s.leader + 1) % len(s.conns)
++			continue
++		}
++
++		// Try to decode response.
++		_, err = decodeResponse(s.conns[s.leader].conn, &response)
++		s.conns[s.leader].lock.Unlock()
++
++		// If failure, use leader hint or wait for election to complete.
++		if err != nil {
++			if response != nil && response.GetLeaderAddress() != "" {
++				s.leader = (s.leader + 1) % len(s.conns)
++				for i, addr := range s.addrs {
++					if addr == response.GetLeaderAddress() {
++						s.leader = i
++						break
++					}
++				}
++			} else {
++				time.Sleep(100 * time.Millisecond)
++			}
++		} else {
++			return nil
++		}
++	}
+ 
+-	// Done
+-	return netConn, nil
++	return ErrNoActiveLeader
+ }
+diff --git a/src/raft/snapshot.go b/src/raft/snapshot.go
+index 5287ebc..3bb0c4e 100644
+--- a/src/raft/snapshot.go
++++ b/src/raft/snapshot.go
+@@ -22,6 +22,12 @@ type SnapshotMeta struct {
+ 	Index uint64
+ 	Term  uint64
+ 
++	// Next Client ID to use. Used with RIFL.
++	NextClientId uint64
++
++	// Responses to client RPCs. Used with RIFL.
++	ClientResponseCache map[uint64]map[uint64]clientResponseEntry
++
+ 	// Peers is deprecated and used to support version 0 snapshots, but will
+ 	// be populated in version 1 snapshots as well to help with upgrades.
+ 	Peers []byte
+@@ -44,7 +50,7 @@ type SnapshotStore interface {
+ 	// the given committed configuration. The version parameter controls
+ 	// which snapshot version to create.
+ 	Create(version SnapshotVersion, index, term uint64, configuration Configuration,
+-		configurationIndex uint64, trans Transport) (SnapshotSink, error)
++		configurationIndex uint64, nextClientId uint64, clientRequestCache map[uint64]map[uint64]clientResponseEntry, trans Transport) (SnapshotSink, error)
+ 
+ 	// List is used to list the available snapshots in the store.
+ 	// It should return then in descending order, with the highest index first.
+@@ -175,7 +181,7 @@ func (r *Raft) takeSnapshot() (string, error) {
+ 	r.logger.Printf("[INFO] raft: Starting snapshot up to %d", snapReq.index)
+ 	start := time.Now()
+ 	version := getSnapshotVersion(r.protocolVersion)
+-	sink, err := r.snapshots.Create(version, snapReq.index, snapReq.term, committed, committedIndex, r.trans)
++	sink, err := r.snapshots.Create(version, snapReq.index, snapReq.term, committed, committedIndex, r.nextClientId, r.clientResponseCache, r.trans)
+ 	if err != nil {
+ 		return "", fmt.Errorf("failed to create snapshot: %v", err)
+ 	}
+diff --git a/src/raft/util.go b/src/raft/util.go
+index 69dcfba..90428d7 100644
+--- a/src/raft/util.go
++++ b/src/raft/util.go
+@@ -33,7 +33,7 @@ func randomTimeout(minVal time.Duration) <-chan time.Time {
+ 		return nil
+ 	}
+ 	extra := (time.Duration(rand.Int63()) % minVal)
+-    return time.After(minVal + extra)
++	return time.After(minVal + extra)
+ }
+ 
+ // min returns the minimum.
+diff --git a/src/test/gc_client.go b/src/test/gc_client.go
+new file mode 100644
+index 0000000..9baf0f2
+--- /dev/null
++++ b/src/test/gc_client.go
+@@ -0,0 +1,46 @@
++package main
++
++import (
++    "raft"
++    "fmt"
++    "test/keyValStore"
++    "time"
++    "test/utils"
++    "os"
++)
++
++var c *keyValStore.Client
++
++func main() {
++    trans, transErr := raft.NewTCPTransport("127.0.0.1:5000", nil, 2, time.Second, nil)
++    if transErr != nil {
++        fmt.Fprintf(os.Stderr, "Error with creating TCP transport, could not run tests: ", transErr)
++        return
++    }
++    var err error
++    servers := []raft.ServerAddress{"127.0.0.1:8000","127.0.0.1:8001","127.0.0.1:8002"}
++    c, err = keyValStore.CreateClient(trans, servers)
++    if err != nil {
++        fmt.Fprintf(os.Stderr, "Error creating client session, could not run tests: ", err)
++        return
++    }
++
++    testsFailed := utils.RunTestSuite(testGc)
++    fmt.Println(testsFailed)
++}
++
++func testGc() (error) {
++    val1, err1 := c.IncWithSeqno(1234)
++    if err1 != nil {
++        return fmt.Errorf("Error sending RPC first time: %v", err1)
++    }
++    time.Sleep(time.Second)
++    val2, err2 := c.IncWithSeqno(1234)
++    if err2 != nil {
++        return fmt.Errorf("Error retransmitting RPC: %v", err2)
++    }
++    if val1 == val2 {
++        return fmt.Errorf("Cached responses not correctly garbage collected.")
++    }
++    return nil
++}
+diff --git a/src/test/keyValStore/client.go b/src/test/keyValStore/client.go
+new file mode 100644
+index 0000000..9a7b823
+--- /dev/null
++++ b/src/test/keyValStore/client.go
+@@ -0,0 +1,105 @@
++package keyValStore 
++
++import (
++    "raft"
++    "encoding/json"
++)
++
++type Client struct {
++    // Client transport layer.
++    trans       *raft.NetworkTransport
++    // Addresses in cluster.
++    servers     []raft.ServerAddress
++    // Open session with cluster leader.
++    session     *raft.Session
++}
++
++// Create new client for sending RPCs.
++func CreateClient(trans *raft.NetworkTransport, servers []raft.ServerAddress) (*Client, error) {
++    newSession, err := raft.CreateClientSession(trans, servers)
++    if err != nil {
++        return nil, err
++    }
++    return &Client {
++        trans:      trans,
++        servers:    servers,
++        session:    newSession,
++    }, nil
++}
++
++// Cleanup associated with client.
++func (c *Client) DestroyClient() {
++    c.session.CloseClientSession()
++}
++
++func (c *Client) Inc() (uint64, error) {
++    args := make(map[string]string)
++    args[FunctionArg] = IncCommand
++    data, marshal_err := json.Marshal(args)
++    if marshal_err != nil {
++        return 0, marshal_err
++    }
++    resp := raft.ClientResponse{}
++    keys := []raft.Key{raft.Key([]byte{1})}
++    c.session.SendFastRequest(data, keys, &resp)
++    var response IncResponse
++    recvErr := json.Unmarshal(resp.ResponseData, &response)
++    if recvErr != nil {
++        return 0, recvErr
++    }
++    return response.Value, nil
++}
++
++func (c *Client) IncWithSeqno(seqno uint64) (uint64, error) {
++    args := make(map[string]string)
++    args[FunctionArg] = IncCommand
++    data, marshal_err := json.Marshal(args)
++    if marshal_err != nil {
++        return 0, marshal_err
++    }
++    resp := raft.ClientResponse{}
++    keys := []raft.Key{raft.Key([]byte{1})}
++    c.session.SendFastRequestWithSeqNo(data, keys, &resp, seqno)
++    var response IncResponse
++    recvErr := json.Unmarshal(resp.ResponseData, &response)
++    if recvErr != nil {
++        return 0, recvErr
++    }
++    return response.Value, nil
++}
++
++
++// Send RPC to set the value of a key. No expected response.
++func (c *Client) Set(key string, value string) error {
++    args := make(map[string]string)
++    args[FunctionArg] = SetCommand
++    args[KeyArg] = key
++    args[ValueArg] = value
++    data, marshal_err := json.Marshal(args)
++    if marshal_err != nil  {
++        return marshal_err
++    }
++    keys := []raft.Key{raft.Key([]byte(key))}
++    c.session.SendFastRequest(data, keys, &raft.ClientResponse{})
++    return nil
++}
++
++// Send RPC to get the value of a key. Empty string if error. 
++func (c *Client) Get(key string) (string, error) {
++    args := make(map[string]string)
++    args[FunctionArg] = GetCommand
++    args[KeyArg] = key
++    data, marshal_err := json.Marshal(args)
++    if marshal_err != nil {
++        return "", marshal_err
++    }
++    resp := raft.ClientResponse{}
++    keys := []raft.Key{raft.Key([]byte(key))}
++    c.session.SendFastRequest(data, keys, &resp)
++    var response GetResponse
++    recvErr := json.Unmarshal(resp.ResponseData, &response)
++    if recvErr != nil {
++        return "", recvErr
++    }
++    return response.Value, nil
++}
+diff --git a/src/test/keyValStore/cluster.go b/src/test/keyValStore/cluster.go
+new file mode 100644
+index 0000000..316f36e
+--- /dev/null
++++ b/src/test/keyValStore/cluster.go
+@@ -0,0 +1,144 @@
++package keyValStore 
++
++import(
++	"fmt"
++	"raft"
++	"io/ioutil"
++	"time"
++	"log"
++	"os"
++)
++
++
++func MakeNewCluster(n int, fsms []raft.FSM, addrs []raft.ServerAddress, gcInterval time.Duration, gcRemoveTime time.Duration) *cluster {
++    return MakeCluster(n, fsms, addrs, gcInterval, gcRemoveTime, nil)
++}
++
++func RestartCluster(c *cluster) {
++    for i := range c.fsms {
++        trans, err := raft.NewTCPTransport(string(c.trans[i].LocalAddr()), nil, 2, time.Second, nil)
++        if err != nil {
++            fmt.Println("[ERR] err creating transport: ", err)
++        }
++        c.trans[i] = trans
++    }
++
++    for i := range c.fsms {
++		peerConf := c.conf
++		peerConf.LocalID = c.configuration.Servers[i].ID
++        peerConf.Logger = log.New(os.Stdout, string(peerConf.LocalID) + " : ", log.Lmicroseconds)
++
++       err := raft.RecoverCluster(peerConf, c.fsms[i], c.stores[i], c.stores[i], c.snaps[i], c.trans[i], c.configuration)
++        if err != nil {
++            fmt.Println("[ERR] err: %v", err)
++        }
++        raft, err := raft.NewRaft(peerConf, c.fsms[i], c.stores[i], c.stores[i], c.snaps[i], c.trans[i])
++		if err != nil {
++		    fmt.Println("[ERR] NewRaft failed: %v", err)
++		}
++
++		raft.AddVoter(peerConf.LocalID, c.trans[i].LocalAddr(), 0, 0)
++    }
++
++}
++
++func ShutdownCluster(nodes []*raft.Raft) {
++    for _,node := range nodes {
++        f := node.Shutdown()
++        if f.Error() != nil {
++            fmt.Println("Error shutting down cluster: ", f.Error())
++        }
++    }
++}
++
++// Starts up a new cluster.
++func MakeCluster(n int, fsms []raft.FSM, addrs []raft.ServerAddress, gcInterval time.Duration, gcRemoveTime time.Duration, startingCluster *cluster) (*cluster) {
++    conf := raft.DefaultConfig()
++    if gcInterval != 0 {
++        conf.ClientResponseGcInterval = gcInterval
++    }
++    if gcRemoveTime != 0 {
++        conf.ClientResponseGcRemoveTime = gcRemoveTime
++    }
++    bootstrap := true
++
++    c := &cluster{
++		conf:          conf,
++		// Propagation takes a maximum of 2 heartbeat timeouts (time to
++		// get a new heartbeat that would cause a commit) plus a bit.
++		propagateTimeout: conf.HeartbeatTimeout*2 + conf.CommitTimeout,
++		longstopTimeout:  5 * time.Second,
++	}
++
++	// Setup the stores and transports
++	for i := 0; i < n; i++ {
++		dir, err := ioutil.TempDir("", "raft")
++		if err != nil {
++			fmt.Println("[ERR] err: %v ", err)
++		}
++
++		store := raft.NewInmemStore()
++		c.dirs = append(c.dirs, dir)
++		c.stores = append(c.stores, store)
++        c.fsms = append(c.fsms, fsms[i])
++
++
++	    snap, err := raft.NewFileSnapshotStore(dir, 3, nil)
++		c.snaps = append(c.snaps, snap)
++
++        trans, err := raft.NewTCPTransport(string(addrs[i]), nil, 2, time.Second, nil)
++        if err != nil {
++            fmt.Println("[ERR] err creating transport: ", err)
++        }
++        c.trans = append(c.trans, trans)
++        c.configuration.Servers = append(c.configuration.Servers, raft.Server{
++            Suffrage:   raft.Voter,
++            ID:         raft.ServerID(fmt.Sprintf("server-%s", trans.LocalAddr())),
++            Address:    addrs[i],
++        })
++	}
++
++	// Create all the rafts
++	c.startTime = time.Now()
++	for i := 0; i < n; i++ {
++		logs := c.stores[i]
++		store := c.stores[i]
++		snap := c.snaps[i]
++		trans := c.trans[i]
++
++		peerConf := conf
++		peerConf.LocalID = c.configuration.Servers[i].ID
++        peerConf.Logger = log.New(os.Stdout, string(peerConf.LocalID) + " : ", log.Lmicroseconds)
++
++		if bootstrap {
++			err := raft.BootstrapCluster(peerConf, logs, store, snap, trans, c.configuration)
++			if err != nil {
++				fmt.Println("[ERR] BootstrapCluster failed: %v", err)
++			}
++		}
++
++		raft, err := raft.NewRaft(peerConf, c.fsms[i], logs, store, snap, trans)
++		if err != nil {
++		    fmt.Println("[ERR] NewRaft failed: %v", err)
++		}
++
++		raft.AddVoter(peerConf.LocalID, trans.LocalAddr(), 0, 0)
++		c.Rafts = append(c.Rafts, raft)
++	}
++
++    return c
++}
++
++type cluster struct {
++	dirs             []string
++	stores           []*raft.InmemStore
++	fsms             []raft.FSM
++	snaps            []*raft.FileSnapshotStore
++	trans            []raft.Transport
++	Rafts            []*raft.Raft
++	conf             *raft.Config
++	propagateTimeout time.Duration
++	longstopTimeout  time.Duration
++	startTime        time.Time
++    configuration    raft.Configuration
++}
+diff --git a/src/test/keyValStore/defs.go b/src/test/keyValStore/defs.go
+new file mode 100644
+index 0000000..914c90c
+--- /dev/null
++++ b/src/test/keyValStore/defs.go
+@@ -0,0 +1,19 @@
++package keyValStore
++
++// Client RPCs.
++const GetCommand string = "Get"
++const SetCommand string = "Set"
++const IncCommand string = "Inc"
++const FunctionArg string = "function"
++const KeyArg string = "key"
++const ValueArg string = "value"
++
++// Response to Get RPC. 
++type GetResponse struct {
++    Value string
++}
++
++// Response to Inc RPC.
++type IncResponse struct {
++    Value uint64
++}
+diff --git a/src/test/keyValStore/worker.go b/src/test/keyValStore/worker.go
+new file mode 100644
+index 0000000..67f0ed2
+--- /dev/null
++++ b/src/test/keyValStore/worker.go
+@@ -0,0 +1,71 @@
++package keyValStore
++
++import(
++    "raft"
++    "encoding/json"
++    "fmt"
++    "io"
++)
++
++// *WorkerFSM implements raft.FSM by implementing Apply,
++// Snapshot, Restore.
++type WorkerFSM struct {
++    // Map representing key-value store.
++    KeyValMap       map[string]string
++    counter         uint64
++}
++
++type WorkerSnapshot struct{}
++
++// Create array of worker FSMs for starting a cluster.
++func CreateWorkers(n int) ([]raft.FSM) {
++    workers := make([]*WorkerFSM, n)
++    for i := range workers {
++        workers[i] = &WorkerFSM{
++            KeyValMap:  make(map[string]string),
++            counter:    0,
++        }
++    }
++    fsms := make([]raft.FSM, n)
++    for i, w := range workers {
++        fsms[i] = w
++    }
++    return fsms
++}
++
++// TODO: remove callbacks from raft
++// Apply command to FSM and return response and callback
++func (w *WorkerFSM) Apply(log *raft.Log)(interface{}) {
++    args := make(map[string]string)
++    err := json.Unmarshal(log.Data, &args)
++    if err != nil {
++        fmt.Println("Poorly formatted request: ", err)
++        return nil
++    }
++    function := args[FunctionArg]
++    switch function {
++        case GetCommand:
++            return GetResponse{Value: w.KeyValMap[args[KeyArg]]}
++        case SetCommand:
++            w.KeyValMap[args[KeyArg]] = args[ValueArg]
++            return nil
++        case IncCommand:
++            w.counter += 1
++            return IncResponse{Value: w.counter}
++    }
++    return nil
++}
++
++// TODO: implement for key-value store
++func (w *WorkerFSM) Snapshot() (raft.FSMSnapshot, error) {
++    return WorkerSnapshot{}, nil
++}
++
++// TODO: implement for key-value store
++func (w *WorkerFSM) Restore(i io.ReadCloser) error {
++    return nil
++}
++
++func (s WorkerSnapshot) Persist(sink raft.SnapshotSink) error {return nil}
++
++func (s WorkerSnapshot) Release() {}
+diff --git a/src/test/restart_client.go b/src/test/restart_client.go
+new file mode 100644
+index 0000000..7aca0dc
+--- /dev/null
++++ b/src/test/restart_client.go
+@@ -0,0 +1,46 @@
++package main
++
++import (
++    "raft"
++    "fmt"
++    "test/keyValStore"
++    "time"
++    "test/utils"
++    "os"
++)
++
++var c *keyValStore.Client
++
++func main() {
++    trans, transErr := raft.NewTCPTransport("127.0.0.1:5000", nil, 2, time.Second, nil)
++    if transErr != nil {
++        fmt.Fprintf(os.Stderr, "Error with creating TCP transport, could not run tests: ", transErr)
++        return
++    }
++    var err error
++    servers := []raft.ServerAddress{"127.0.0.1:8000","127.0.0.1:8001","127.0.0.1:8002"}
++    c, err = keyValStore.CreateClient(trans, servers)
++    if err != nil {
++        fmt.Fprintf(os.Stderr, "Error creating client session, could not run tests: ", err)
++        return
++    }
++
++    testsFailed := utils.RunTestSuite(testRestartWithClientCaches)
++    fmt.Println(testsFailed)
++}
++
++func testRestartWithClientCaches() (error) {
++    val1, err1 := c.IncWithSeqno(1234)
++    if err1 != nil {
++        return fmt.Errorf("Error sending RPC first time: %v", err1)
++    }
++    time.Sleep(2*time.Second)
++    val2, err2 := c.IncWithSeqno(1234)
++    if err2 != nil {
++        return fmt.Errorf("Error retransmitting RPC: %v", err2)
++    }
++    if val1 != val2 {
++        return fmt.Errorf("Cached responses not correctly restored from snapshot after restart: %v, %v.", val1, val2)
++    }
++    return nil
++}
+diff --git a/src/test/restart_cluster.go b/src/test/restart_cluster.go
+new file mode 100644
+index 0000000..df8ac32
+--- /dev/null
++++ b/src/test/restart_cluster.go
+@@ -0,0 +1,46 @@
++package main 
++
++import(
++    "raft"
++    "test/keyValStore"
++    "os"
++    "os/signal"
++    "time"
++    "strconv"
++    "fmt"
++)
++
++// Optional first argument is interval at which to garbage collect entries from client response cache
++// in milliseconds. Optional second argument is length of time that entries should be left in the 
++// client response cache before being garbage collected (in milliseconds).
++func main() {
++    args := os.Args[1:]
++    var gcInterval, gcRemoveTime time.Duration
++    gcInterval = 0
++    gcRemoveTime = 0 
++    if len(args) > 0 {
++        interval, err := strconv.Atoi(args[0])
++        if err != nil {
++            fmt.Println("GC Interval must be an integer.")
++            return
++        }
++        gcInterval = time.Duration(interval) * time.Millisecond
++    }
++    if len(args) > 1 {
++        removeTime, err := strconv.Atoi(args[1])
++        if err != nil {
++            fmt.Println("GC remove time must be an integer.")
++            return
++        }
++        gcRemoveTime = time.Duration(removeTime) * time.Millisecond
++    }
++    addrs := []raft.ServerAddress{"127.0.0.1:8000","127.0.0.1:8001","127.0.0.1:8002"}
++    cluster := keyValStore.MakeNewCluster(3, keyValStore.CreateWorkers(3), addrs, gcInterval, gcRemoveTime)
++    time.Sleep(10*time.Second)
++    keyValStore.ShutdownCluster(cluster.Rafts)
++    fmt.Println("Restarting cluster")
++    keyValStore.RestartCluster(cluster)
++    c := make(chan os.Signal, 1)
++    signal.Notify(c, os.Interrupt)
++    <-c
++}
+diff --git a/src/test/rifl_client.go b/src/test/rifl_client.go
+new file mode 100644
+index 0000000..2e54473
+--- /dev/null
++++ b/src/test/rifl_client.go
+@@ -0,0 +1,82 @@
++package main
++
++import (
++    "raft"
++    "fmt"
++    "test/keyValStore"
++    "time"
++    "test/utils"
++    "os"
++)
++
++var c1 *keyValStore.Client
++var c2 *keyValStore.Client
++
++func main() {
++    trans, transErr := raft.NewTCPTransport("127.0.0.1:5000", nil, 2, time.Second, nil)
++    if transErr != nil {
++        fmt.Fprintf(os.Stderr, "Error with creating TCP transport, could not run tests: ", transErr)
++        return
++    }
++    var err error
++    servers := []raft.ServerAddress{"127.0.0.1:8000","127.0.0.1:8001","127.0.0.1:8002"}
++    c1, err = keyValStore.CreateClient(trans, servers)
++    if err != nil {
++        fmt.Fprintf(os.Stderr, "Error creating client session, could not run tests: ", err)
++        return
++    }
++    c2, err = keyValStore.CreateClient(trans, servers)
++    if err != nil {
++        fmt.Fprintf(os.Stderr, "Error creating second client session, could not run tests: ", err)
++        return
++    }
++
++    testsFailed := utils.RunTestSuite(testSameClientSameSeqno, testSameClientDiffSeqno, testDiffClientSameSeqno)
++    fmt.Println(testsFailed)
++}
++
++func testSameClientSameSeqno() (error) {
++    val1, val2, err := sendIncRpcs(c1, c1, 1234, 1234)
++    if err != nil {
++        return fmt.Errorf("Error sending same request from same client with same sequence number: %v", err)
++    }
++    if val1 != val2 {
++        return fmt.Errorf("Requests from same client with same sequence number produced different results: %v, %v", val1, val2)
++    }
++    return nil
++}
++
++func testSameClientDiffSeqno() (error) {
++    // Test same client, different sequence number
++    val1, val2, err := sendIncRpcs(c1, c1, 12, 34)
++    if err != nil {
++        return fmt.Errorf("Error sending same request from same client with different sequence number: %v", err)
++    }
++    if val1 == val2 {
++        return fmt.Errorf("Requests from same client with different sequence numbers produced same results: %v, %v", val1, val2)
++    }
++    return nil
++}
++
++func testDiffClientSameSeqno() (error) {
++    val1, val2, err := sendIncRpcs(c1, c2, 123, 123)
++    if err != nil {
++        return fmt.Errorf("Error sending same request from different clients with same sequence number: %v", err)
++    }
++    if val1 == val2 {
++        return fmt.Errorf("Requests from different clients with same sequence numbers produced same results: %v, %v", val1, val2)
++    }
++    return nil
++}
++
++func sendIncRpcs(c1 *keyValStore.Client, c2 *keyValStore.Client, seqno1 uint64, seqno2 uint64) (uint64, uint64, error) {
++    val1, err1 := c1.IncWithSeqno(seqno1)
++    if err1 != nil {
++        return 0, 0, fmt.Errorf("Error sending RPC first time: %v", err1)
++    }
++    val2, err2 := c2.IncWithSeqno(seqno2)
++    if err2 != nil {
++        return 0, 0, fmt.Errorf("Error retransmitting RPC: %v", err2)
++    }
++    return val1, val2, nil
++}
+diff --git a/src/test/runTests.sh b/src/test/runTests.sh
+new file mode 100755
+index 0000000..0706d79
+--- /dev/null
++++ b/src/test/runTests.sh
+@@ -0,0 +1,29 @@
++if ! go build run_cluster.go
++then
++    echo "Cluster build failing. Cannot run tests."
++    return
++fi
++echo "Starting tests..."
++echo ""
++./run_cluster > /dev/null &> /dev/null &
++sleep .1
++FAILED=$(go run sanity_check.go)
++FAILED=$(expr $(go run rifl_client.go) + $FAILED)
++CLUSTER_JOB=$(ps aux | grep "run_cluster" | grep -v grep | awk '{print $2}') &> /dev/null
++kill $CLUSTER_JOB &> /dev/null
++wait $CLUSTER_JOB &> /dev/null
++./run_cluster 10 100 > /dev/null &> /dev/null &
++sleep .1
++FAILED=$(expr $(go run gc_client.go) + $FAILED)
++CLUSTER_JOB=$(ps aux | grep "run_cluster" | grep -v grep | awk '{print $2}') &> /dev/null
++kill $CLUSTER_JOB &> /dev/null
++wait $CLUSTER_JOB &> /dev/null
++go run restart_cluster.go > /dev/null &> /dev/null &
++sleep .1
++FAILED=$(go run restart_client.go)
++CLUSTER_JOB=$(ps aux | grep "run_cluster" | grep -v grep | awk '{print $2}') &> /dev/null
++kill $CLUSTER_JOB &> /dev/null
++wait $CLUSTER_JOB &> /dev/null
++echo ""
++echo "***** TESTS FAILED: "$FAILED" *****"
++
+diff --git a/src/test/run_cluster.go b/src/test/run_cluster.go
+new file mode 100644
+index 0000000..19a7a2a
+--- /dev/null
++++ b/src/test/run_cluster.go
+@@ -0,0 +1,42 @@
++package main 
++
++import(
++    "raft"
++    "test/keyValStore"
++    "os"
++    "os/signal"
++    "time"
++    "strconv"
++    "fmt"
++)
++
++// Optional first argument is interval at which to garbage collect entries from client response cache
++// in milliseconds. Optional second argument is length of time that entries should be left in the 
++// client response cache before being garbage collected (in milliseconds).
++func main() {
++    args := os.Args[1:]
++    var gcInterval, gcRemoveTime time.Duration
++    gcInterval = 0
++    gcRemoveTime = 0 
++    if len(args) > 0 {
++        interval, err := strconv.Atoi(args[0])
++        if err != nil {
++            fmt.Println("GC Interval must be an integer.")
++            return
++        }
++        gcInterval = time.Duration(interval) * time.Millisecond
++    }
++    if len(args) > 1 {
++        removeTime, err := strconv.Atoi(args[1])
++        if err != nil {
++            fmt.Println("GC remove time must be an integer.")
++            return
++        }
++        gcRemoveTime = time.Duration(removeTime) * time.Millisecond
++    }
++    addrs := []raft.ServerAddress{"127.0.0.1:8000","127.0.0.1:8001","127.0.0.1:8002"}
++    keyValStore.MakeNewCluster(3, keyValStore.CreateWorkers(3), addrs, gcInterval, gcRemoveTime)
++    c := make(chan os.Signal, 1)
++    signal.Notify(c, os.Interrupt)
++    <-c
++}
+diff --git a/src/test/sanity_check.go b/src/test/sanity_check.go
+new file mode 100644
+index 0000000..79d219d
+--- /dev/null
++++ b/src/test/sanity_check.go
+@@ -0,0 +1,41 @@
++package main
++
++import (
++    "test/keyValStore"
++    "raft"
++    "fmt"
++    "strings"
++    "time"
++    "test/utils"
++)
++
++var c *keyValStore.Client
++
++func main() {
++    trans, err := raft.NewTCPTransport("127.0.0.1:5000", nil, 2, time.Second, nil)
++    if err != nil {
++        fmt.Println("Error with creating TCP transport: ", err)
++        return
++    }
++    servers := []raft.ServerAddress{"127.0.0.1:8000","127.0.0.1:8001","127.0.0.1:8002"}
++    c, err = keyValStore.CreateClient(trans, servers)
++    if err != nil {
++        fmt.Println("Can't create client session", err)
++        return
++    }
++
++    testsFailed := utils.RunTestSuite(testSanityCheck)
++    fmt.Println(testsFailed)
++}
++
++func testSanityCheck() (error) {
++    c.Set("foo","bar")
++    str, getErr := c.Get("foo")
++    if getErr != nil {
++        return fmt.Errorf("Error sending Get RPC: %v", getErr)
++    }
++    if strings.Compare(str,"bar") != 0 {
++        return fmt.Errorf("Should have received 'bar' but instead received '%v'", str)
++    }
++    return nil
++}
+diff --git a/src/test/utils/test.go b/src/test/utils/test.go
+new file mode 100644
+index 0000000..1c34cf4
+--- /dev/null
++++ b/src/test/utils/test.go
+@@ -0,0 +1,24 @@
++package utils
++
++import (
++    "fmt"
++    "os"
++    "runtime"
++    "reflect"
++)
++
++func RunTestSuite(tests ...func()(error)) int {
++    testsFailed := 0
++
++    for _,test := range tests {
++        err := test()
++        testName := runtime.FuncForPC(reflect.ValueOf(test).Pointer()).Name()
++        if err != nil {
++            fmt.Fprintf(os.Stderr, "%v FAILING: %v\n", testName, err)
++            testsFailed += 1
++        }
++        fmt.Fprintf(os.Stderr, "%v passing\n", testName)
++    }
++
++    return testsFailed
++}
