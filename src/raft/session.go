@@ -6,17 +6,27 @@ import (
     "sync"
 )
 
+// Client library for Raft. Provides session abstraction that handles starting
+// a session, making requests, and closing a session.
+
+// Connection and associated lock for synchronization.
 type syncedConn struct {
+    // Connection to Raft server.
     conn    *netConn
+    // Lock protecting conn.
     lock    sync.Mutex
 }
 
+// Session abstraction used to make requests to Raft cluster.
 type Session struct {
+    // Client network layer.
     trans               *NetworkTransport
+    // Connections to all Raft nodes.
     conns               []syncedConn
-    // Leader is index into conns or raftServers arrays.
+    // Leader is index into conns or addrs arrays.
     leader              int
     leaderLock          sync.RWMutex
+    // Addresses of all Raft servers.
     addrs               []ServerAddress
     // Client ID assigned by cluster for use in RIFL. 
     clientID            uint64
@@ -25,8 +35,11 @@ type Session struct {
 }
 
 
-/* Open client session to cluster. Takes clientID, server addresses for all servers in cluster, and returns success or failure.
-   Start go routine to periodically send heartbeat messages and switch to new leader when necessary. */ 
+// Open client session to cluster.
+// Params:
+//   - trans: Client transport layer for networking opertaions
+//   - addrs: Addresses of all Raft servers
+// Return: created session
 func CreateClientSession(trans *NetworkTransport, addrs []ServerAddress) (*Session, error) {
     session := &Session{
         trans: trans,
@@ -70,14 +83,24 @@ func CreateClientSession(trans *NetworkTransport, addrs []ServerAddress) (*Sessi
     return session, nil
 }
 
-/* Make request to open session. */
+// Make request to Raft cluster using open session.
+// Params:
+//   - data: client request to send to cluster
+//   - keys: array of keys that request updates, used in commutativity checks
+//   - resp: pointer to response that will be populated
 func (s *Session) SendRequest(data []byte, keys []Key, resp *ClientResponse) error {
     seqNo := s.rpcSeqNo
     s.rpcSeqNo++
     return s.SendRequestWithSeqNo(data, keys, resp, seqNo)
 }
 
-/* Make request to open session. Only use for testing purposes! */
+// Make request to Raft cluster using open session and specifying a sequence
+// number. Only use for testing! (Use SendRequest in production).
+// Params:
+//   - data: client request to send to cluster
+//   - keys: array of keys that request updates, used in commutativity checks
+//   - resp: pointer to response that will be populated
+//   - seqno: sequence number to use for request (for testing purposes)
 func (s *Session) SendRequestWithSeqNo(data []byte, keys []Key, resp *ClientResponse, seqno uint64) error {
     if resp == nil {
         return errors.New("Response is nil")
@@ -97,17 +120,33 @@ func (s *Session) SendRequestWithSeqNo(data []byte, keys []Key, resp *ClientResp
     return s.sendToActiveLeader(&req, resp, rpcClientRequest)
 }
 
-/* Close client session. TODO: GC client request tables. */
+// Close client session.
+// TODO: GC client request tables.
 func (s *Session) CloseClientSession() error {
     return nil
 }
 
+// Make request to Raft cluster following CURP protocol. Send to witnesses and
+// master simultaneously to complete in 1 RTT.
+// Params:
+//   - data: client request to send to cluster
+//   - keys: array of keys that request updates, used in commutativity checks
+//   - resp: pointer to response that will be populated
+//   - seqno: sequence number to use for request (for testing purposes)
 func (s *Session) SendFastRequest(data []byte, keys []Key, resp *ClientResponse) {
     seqNo := s.rpcSeqNo
     s.rpcSeqNo++
     s.SendFastRequestWithSeqNo(data, keys, resp, seqNo)
 }
 
+// Make request to Raft cluster following CURP protocol. Send to witnesses and
+// master simultaneously to complete in 1 RTT. Specify sequence number for testing
+// purposes. Only use SendFastRequest in production!
+// Params:
+//   - data: client request to send to cluster
+//   - keys: array of keys that request updates, used in commutativity checks
+//   - resp: pointer to response that will be populated
+//   - seqno: sequence number to use for request (for testing purposes)
 func (s *Session) SendFastRequestWithSeqNo(data []byte, keys []Key, resp *ClientResponse, seqNo uint64) {
     req := ClientRequest {
         RPCHeader: RPCHeader {
@@ -139,7 +178,7 @@ func (s *Session) SendFastRequestWithSeqNo(data []byte, keys []Key, resp *Client
 
         success := true
 
-        for i := 0; i <= len(s.addrs); i+=1 {
+        for i := 0; i <= len(s.addrs); i+=1 { // TODO: should this be len + 1?
             result := <-resultCh
             //fmt.Println("result is ", result)
             success = success && result
@@ -160,6 +199,12 @@ func (s *Session) SendFastRequestWithSeqNo(data []byte, keys []Key, resp *Client
 
 }
 
+// Send log entry to all witnesses in parallel and put results (success
+// or failure) into channel. Get all values from channel to ensure that
+// RPCs to witnesses have completed.
+// Params:
+//   - entry: Log entry to send to all witnesses.
+//   - resultCh: channel to put completion status into.
 func (s *Session) sendToAllWitnesses(entry *Log, resultCh *chan bool) {
     req := &RecordRequest {
         RPCHeader: RPCHeader {
@@ -168,7 +213,7 @@ func (s *Session) sendToAllWitnesses(entry *Log, resultCh *chan bool) {
         Entry: entry,
     }
 
-    // Send to all witnesses (excludes leader). 
+    // Send to all witnesses. 
     for i := range s.conns {
         go func(req *RecordRequest, resultCh *chan bool) {
             *resultCh <- s.sendToWitness(i, req)
@@ -176,6 +221,11 @@ func (s *Session) sendToAllWitnesses(entry *Log, resultCh *chan bool) {
     }
 }
 
+// Send request to a witness specified by id. Synchronous. 
+// Params:
+//   - id: ID of witness sending request to
+//   - req: RecordRequest to send to witness
+// Returns: success or failure of RPC.
 func (s * Session) sendToWitness(id int, req *RecordRequest) bool {
     var err error
     s.conns[id].lock.Lock()
@@ -186,7 +236,6 @@ func (s * Session) sendToWitness(id int, req *RecordRequest) bool {
             return false
         }
     }
-    //fmt.Println("send with id %d", id)
     err = sendRPC(s.conns[id].conn, rpcRecordRequest, req)
     if err != nil {
         s.conns[id].lock.Unlock()
@@ -201,6 +250,13 @@ func (s * Session) sendToWitness(id int, req *RecordRequest) bool {
     return true
 }
 
+// Send a RPC to the active leader. Try to use the currently cached active leader, and
+// if there is no cached leader or it is unreachable, try other Raft servers until a
+// leader is found. If no active Raft server is found, return an error.
+// Params:
+//   - request: JSON representation of request
+//   - response: client response that contains a leader address to help find an active leader
+//   - rpcType: type of RPC being sent.
 func (s *Session) sendToActiveLeader(request interface{}, response GenericClientResponse, rpcType uint8) error {
     sendFailures := 0
     var err error
@@ -254,14 +310,4 @@ func (s *Session) sendToActiveLeader(request interface{}, response GenericClient
     }
 
     return ErrNoActiveLeader
-}
-
-func findActiveServerWithTrans(addrs []ServerAddress, trans *NetworkTransport) (*netConn, error) {
-    for _, addr := range(addrs) {
-        conn, err := trans.getConn(addr)
-        if err == nil {
-            return conn, nil
-        }
-    }
-    return nil, errors.New("No active raft servers.")
 }
