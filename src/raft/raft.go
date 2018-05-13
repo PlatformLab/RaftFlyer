@@ -1429,9 +1429,9 @@ func (r *Raft) clientIdRequest(rpc RPC, c *ClientIdRequest) {
 //   - rpc: RPC object used to send a response
 //   - sync: Sync Request being handled.
 func (r *Raft) syncRequest(rpc RPC, sync *SyncRequest) {
-	r.logger.Printf("Tried to sync, not implemented yet")
 	leader := r.Leader()
-	resp := &SyncResponse{
+    r.logger.Printf("leader: ", leader)
+    resp := &SyncResponse{
 		Success:       false,
 		LeaderAddress: leader,
 	}
@@ -1449,8 +1449,9 @@ func (r *Raft) syncRequest(rpc RPC, sync *SyncRequest) {
 		// Apply all commands in client request.
 		r.goFunc(func() {
 			var rpcErr error
-			r.applySynchronousCommand(sync.Entry, resp, &rpcErr)
-			rpc.Respond(resp, rpcErr)
+            resp.ResponseData = r.applySynchronousCommand(sync.Entry, &rpcErr)
+            resp.Success = true
+            rpc.Respond(resp, rpcErr)
 		})
 	} else {
 		resp.Success = false
@@ -1566,13 +1567,14 @@ func (r *Raft) applyCommand(log *Log, resp *ClientResponse, rpcErr *error) {
 	commutative := r.storeIfCommutative(log)
 	if commutative {
 		// Apply locally, store in witness cache, and respond
-		r.applyCommutativeCommand(log, resp, rpcErr)
-		resp.Synced = false
+        resp.ResponseData = r.applyCommutativeCommand(log, rpcErr)
+        resp.Synced = false
 	} else {
 		// Sync all previous requests and execute this request synchronously.
-		r.applySynchronousCommand(log, resp, rpcErr)
+        resp.ResponseData = r.applySynchronousCommand(log, rpcErr)
 		resp.Synced = true
 	}
+    resp.LeaderAddress = r.Leader()
 }
 
 // Apply a command locally. Should only be called by the leader if
@@ -1580,32 +1582,32 @@ func (r *Raft) applyCommand(log *Log, resp *ClientResponse, rpcErr *error) {
 // is stored in its set of current operations.
 // Params:
 //   - log: Log entry to apply commutatively, type LogCommand.
-//   - resp: Response to populate after completing command.
 //   - rpcErr: Pointer to error to set if necessary.
-func (r *Raft) applyCommutativeCommand(log *Log, resp ClientOperationResponse, rpcErr *error) {
+// Returns: byte array containing response to applying command.
+func (r *Raft) applyCommutativeCommand(log *Log, rpcErr *error) []byte {
 	// Apply locally, store in witness cache, and respond
 	var response interface{}
 	r.applyCommandLocally(log, &response)
 	data, _ := json.Marshal(response)
-	resp.ConstructResponse(data, true, r.Leader())
 	// Replicate to client asynchronously
 	r.goFunc(func() { r.Apply(log, 0) })
+    return data
 }
 
 // Replicate a command to followers. Should be called if leader has
 // confirmed that an operation is not commutative.
 // Params: 
 //   - log: Log entry to apply commutatively, type LogCommand.
-//   - resp: Response to populate after completing command.
 //   - rpcErr: Pointer to error to set if necessary.
-func (r *Raft) applySynchronousCommand(log *Log, resp ClientOperationResponse, rpcErr *error) {
+// Returns: byte array containing reponse to applying command.
+func (r *Raft) applySynchronousCommand(log *Log, rpcErr *error) []byte {
 	f := r.Apply(log, 0)
 	if f.Error() != nil {
 		r.logger.Printf("err: %v", f.Error())
 		*rpcErr = f.Error()
 	}
 	data, _ := json.Marshal(f.Response())
-	resp.ConstructResponse(data, true, r.Leader())
+    return data
 }
 
 // setLastContact is used to set the last contact time to now

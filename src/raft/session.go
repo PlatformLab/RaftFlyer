@@ -166,7 +166,6 @@ func (s *Session) SendFastRequestWithSeqNo(data []byte, keys []Key, resp *Client
 		resultCh := make(chan bool, len(s.addrs))
 		go func(s *Session, req *ClientRequest, resp *ClientResponse, resultCh *chan bool) {
 			err := s.sendToActiveLeader(req, resp, rpcClientRequest)
-			//fmt.Println("err sending to leader: ", err)
 			if err != nil {
 				*resultCh <- false
 			} else {
@@ -179,7 +178,6 @@ func (s *Session) SendFastRequestWithSeqNo(data []byte, keys []Key, resp *Client
 
 		for i := 0; i <= len(s.addrs); i += 1 { // TODO: should this be len + 1?
 			result := <-resultCh
-			//fmt.Println("result is ", result)
 			success = success && result
 			// TODO: if synced, automatically succeed, otherwise if not success need to retry
 		}
@@ -191,9 +189,10 @@ func (s *Session) SendFastRequestWithSeqNo(data []byte, keys []Key, resp *Client
 			RPCHeader: RPCHeader{
 				ProtocolVersion: ProtocolVersionMax,
 			},
+            Entry: req.Entry,
 		}
-		var syncResp *SyncResponse
-		err := s.sendToActiveLeader(sync, syncResp, rpcSyncRequest)
+		var syncResp SyncResponse
+		err := s.sendToActiveLeader(sync, &syncResp, rpcSyncRequest)
 		if err == nil && syncResp.Success {
 			return
 		}
@@ -296,7 +295,7 @@ func (s *Session) sendToActiveLeader(request interface{}, response GenericClient
 
 		// If failure, use leader hint or wait for election to complete.
 		if err != nil {
-			if response != nil && response.GetLeaderAddress() != "" {
+            if response != nil && response.GetLeaderAddress() != "" { 
 				s.leader = (s.leader + 1) % len(s.conns)
 				for i, addr := range s.addrs {
 					if addr == response.GetLeaderAddress() {

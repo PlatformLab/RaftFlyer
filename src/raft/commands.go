@@ -199,12 +199,6 @@ type GenericClientResponse interface {
 	GetLeaderAddress() ServerAddress
 }
 
-// Interface for client requests containing log entries to execute
-// (ClientResponse and SyncResponse).
-type ClientOperationResponse interface {
-	ConstructResponse([]byte, bool, ServerAddress)
-}
-
 // Sent when the master has completed the sync in response to SyncRequest.
 type SyncResponse struct {
 	RPCHeader
@@ -222,14 +216,7 @@ func (r *SyncResponse) GetRPCHeader() RPCHeader {
 
 // See GenericClientResponse interface.
 func (r *SyncResponse) GetLeaderAddress() ServerAddress {
-	return r.LeaderAddress
-}
-
-// See ClientOperationResponse interface.
-func (r *SyncResponse) ConstructResponse(data []byte, success bool, leaderAddr ServerAddress) {
-	r.ResponseData = data
-	r.Success = success
-	r.LeaderAddress = leaderAddr
+    return r.LeaderAddress
 }
 
 // Sent by the client to apply a command at a raft cluster.
@@ -268,13 +255,6 @@ func (r *ClientResponse) GetRPCHeader() RPCHeader {
 // See GenericClientResponse interface.
 func (r *ClientResponse) GetLeaderAddress() ServerAddress {
 	return r.LeaderAddress
-}
-
-// See ClientOperationResponse interface.
-func (r *ClientResponse) ConstructResponse(data []byte, success bool, leaderAddr ServerAddress) {
-	r.ResponseData = data
-	r.Success = success
-	r.LeaderAddress = leaderAddr
 }
 
 // Requests an ID for a client. Clients must have an ID allocated by
