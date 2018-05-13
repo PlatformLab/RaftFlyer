@@ -9,6 +9,9 @@ import (
     "os"
 )
 
+// Test that simultaneous commutative and non-commutative operations execute without
+// error.
+
 var c1 *keyValStore.Client
 var c2 *keyValStore.Client
 
