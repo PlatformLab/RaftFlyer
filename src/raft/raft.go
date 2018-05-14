@@ -20,6 +20,8 @@ var (
 	keyCurrentTerm  = []byte("CurrentTerm")
 	keyLastVoteTerm = []byte("LastVoteTerm")
 	keyLastVoteCand = []byte("LastVoteCand")
+    keyWitnessStateKeys = []byte("WitnessStateKeys")
+    keyWitnessStateRecords = []byte("WitnessStateRecords")
 )
 
 // getRPCHeader returns an initialized RPCHeader struct for the given
@@ -942,8 +944,13 @@ func (r *Raft) processLog(l *Log, future *logFuture) {
 			SeqNo:    l.SeqNo,
 		}
 		r.witnessState.lock.Lock()
+        // TODO: also need to delete key
 		delete(r.witnessState.records, clientSeqNo)
-		r.witnessState.lock.Unlock()
+        for _,key := range l.Keys {
+            delete(r.witnessState.keys, &key)
+        }
+        r.stableSetWitnessState()
+        r.witnessState.lock.Unlock()
 
 		// Return so that the future is only responded to
 		// by the FSM handler when the application is done
@@ -970,6 +977,28 @@ func (r *Raft) processLog(l *Log, future *logFuture) {
 	if future != nil {
 		future.respond(nil)
 	}
+}
+
+// stableSetWitnessStorage writes the witnessState to stable storage. 
+// Should only be called if r.witnessState.Lock is held. Panics if 
+// failure.
+func (r *Raft) stableSetWitnessState() {
+    records, err1 := encodeMsgPack(r.witnessState.records)
+    if err1 != nil {
+        panic(fmt.Errorf("failed to encode witness state records: %v", err1))
+    }
+    err2 := r.stable.Set(keyWitnessStateRecords, records.Bytes())
+	if err2 != nil {
+        panic(fmt.Errorf("failed to write witness state records to stable storage: %v", err2))
+    }
+    keys, err3 := encodeMsgPack(r.witnessState.keys)
+    if err3 != nil {
+        panic(fmt.Errorf("failed to encode witness state keys: %v", err3))
+    }
+    err4 := r.stable.Set(keyWitnessStateRecords, keys.Bytes())
+	if err4 != nil {
+        panic(fmt.Errorf("failed to write witness state keys to stable storage: %v", err4))
+    }
 }
 
 // processRPC is called to handle an incoming RPC request. This must only be
@@ -1515,6 +1544,9 @@ func (r *Raft) storeIfCommutative(log *Log) bool {
 		SeqNo:    log.SeqNo,
 	}
 	r.witnessState.records[clientSeqNo] = log
+
+    // Write updates to stable storage.
+    r.stableSetWitnessState()
 
 	return true
 }
