@@ -219,6 +219,32 @@ func (r *SyncResponse) GetLeaderAddress() ServerAddress {
     return r.LeaderAddress
 }
 
+// Sent from new leader to witness to set witness into recovery
+// mode (don't receive requests) and get all client requests stored
+// at witness.
+type RecoveryDataRequest struct {
+    RPCHeader
+}
+
+// See WithRPCHeader.
+func (r *RecoveryDataRequest) GetRPCHeader() RPCHeader {
+    return r.RPCHeader
+}
+
+// Contains all client requests stored at witness, sent from witness
+// to new leader. 
+type RecoveryDataResponse struct {
+    RPCHeader
+
+    // All client requests stored at witness.
+    Entries []*Log
+}
+
+// See WithRPCHeader.
+func (r *RecoveryDataResponse) GetRPCHeader() RPCHeader {
+    return r.RPCHeader
+}
+
 // Sent by the client to apply a command at a raft cluster.
 type ClientRequest struct {
 	RPCHeader

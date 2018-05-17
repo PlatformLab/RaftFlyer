@@ -8,8 +8,9 @@ import (
 	"github.com/armon/go-metrics"
 	"io"
 	"io/ioutil"
-	"sync"
 	"time"
+    "encoding/binary"
+    "crypto/sha256"
 )
 
 const (
@@ -94,13 +95,6 @@ type ClientSeqNo struct {
 	ClientID uint64
 	// Identifies unique RPC from a client.
 	SeqNo uint64
-}
-
-// witnessState is state for maintaining records as a witness.
-type witnessState struct {
-	keys    map[*Key]bool
-	records map[*ClientSeqNo]*Log
-	lock    sync.RWMutex
 }
 
 // setLeader is used to modify the current leader of the cluster
@@ -289,7 +283,7 @@ func (r *Raft) runCandidate() {
 			// Check if we've become the leader
 			if grantedVotes >= votesNeeded {
 				r.logger.Printf("[INFO] raft: Election won. Tally: %d", grantedVotes)
-				r.setState(Leader)
+                r.setState(Leader)
 				r.setLeader(r.localAddr)
 				return
 			}
@@ -430,6 +424,9 @@ func (r *Raft) runLeader() {
 	}
 	r.dispatchLogs([]*logFuture{noop})
 
+    //TODO: make sure it's safe to replay from witnesses here (can't start having client requests)
+    r.recoverWithWitness()
+
 	// Sit in the leader loop until we step down
 	r.leaderLoop()
 }
@@ -478,6 +475,16 @@ func (r *Raft) startStopReplication() {
 		close(repl.stopCh)
 		delete(r.leaderState.replState, serverID)
 	}
+}
+
+// Replay requests from a witness. Should only be called when a new leader
+// is elected. Witness is set to recovery mode and sends all saved client
+// requests, which are replayed by the new master.
+func (r *Raft) recoverWithWitness() {
+    // Pick a witness.
+    // Send a RecoverDataRequest to witness.
+    // Execute all saved operations synchronously.
+    // (Unfreeze witness?)
 }
 
 // configurationChangeChIfStable returns r.configurationChangeCh if it's safe
@@ -939,18 +946,20 @@ func (r *Raft) processLog(l *Log, future *logFuture) {
 		}
 
 		// Garbage collect at witnesses.
-		clientSeqNo := &ClientSeqNo{
+		clientSeqNo := ClientSeqNo{
 			ClientID: l.ClientID,
 			SeqNo:    l.SeqNo,
 		}
-		r.witnessState.lock.Lock()
         // TODO: also need to delete key
-		delete(r.witnessState.records, clientSeqNo)
+        records, keys := stableGetWitnessState(r.stable)
+		delete(records, clientSeqNo)
         for _,key := range l.Keys {
-            delete(r.witnessState.keys, &key)
+            hash := getKeyHash(key) 
+            if bytes.Compare(key, keys[hash]) == 0 {
+                delete(keys, hash)
+            }
         }
-        r.stableSetWitnessState()
-        r.witnessState.lock.Unlock()
+        stableSetWitnessState(r.stable, records, keys)
 
 		// Return so that the future is only responded to
 		// by the FSM handler when the application is done
@@ -979,26 +988,58 @@ func (r *Raft) processLog(l *Log, future *logFuture) {
 	}
 }
 
+// Hashes a key to be used in a direct-mapped cache.
+// Params:
+//   - key: Key to get hash value of
+// Returns: hash of key
+func getKeyHash(key Key) uint32 {
+    hash := sha256.Sum256(key)
+    hashSlice := hash[:]
+    return binary.LittleEndian.Uint32(hashSlice)
+}
+
 // stableSetWitnessStorage writes the witnessState to stable storage. 
 // Should only be called if r.witnessState.Lock is held. Panics if 
 // failure.
-func (r *Raft) stableSetWitnessState() {
-    records, err1 := encodeMsgPack(r.witnessState.records)
+func stableSetWitnessState(stable StableStore, records map[ClientSeqNo]Log, keys map[uint32]Key) {
+    recordsBuf, err1 := encodeMsgPack(records)
     if err1 != nil {
         panic(fmt.Errorf("failed to encode witness state records: %v", err1))
     }
-    err2 := r.stable.Set(keyWitnessStateRecords, records.Bytes())
+    err2 := stable.Set(keyWitnessStateRecords, recordsBuf.Bytes())
 	if err2 != nil {
         panic(fmt.Errorf("failed to write witness state records to stable storage: %v", err2))
     }
-    keys, err3 := encodeMsgPack(r.witnessState.keys)
+    keysBuf, err3 := encodeMsgPack(keys)
     if err3 != nil {
         panic(fmt.Errorf("failed to encode witness state keys: %v", err3))
     }
-    err4 := r.stable.Set(keyWitnessStateRecords, keys.Bytes())
+    err4 := stable.Set(keyWitnessStateKeys, keysBuf.Bytes())
 	if err4 != nil {
         panic(fmt.Errorf("failed to write witness state keys to stable storage: %v", err4))
     }
+}
+
+func stableGetWitnessState(stable StableStore) (map[ClientSeqNo]Log, map[uint32]Key) {
+    recordsBuf, err1 := stable.Get(keyWitnessStateRecords)
+    if err1 != nil {
+        panic(fmt.Errorf("failed to read witness state records from stable storage: %v", err1))
+    }
+    records := make(map[ClientSeqNo]Log)
+    err2 := decodeMsgPack(recordsBuf, &records)
+    if err2 != nil {
+        panic(fmt.Errorf("failed to decode witness state records: %v", err2))
+    }
+    keysBuf, err3 := stable.Get(keyWitnessStateKeys)
+    if err3 != nil {
+        panic(fmt.Errorf("failed to read witness state keys from stable storage: %v", err3))
+    }
+    keys := make(map[uint32]Key)
+    err4 := decodeMsgPack(keysBuf, &keys)
+    if err4 != nil {
+        panic(fmt.Errorf("failed to decode witness state keys: %v", err4))
+    }
+    return records, keys
 }
 
 // processRPC is called to handle an incoming RPC request. This must only be
@@ -1524,29 +1565,31 @@ func (r *Raft) recordRequest(rpc RPC, record *RecordRequest) {
 // Return true if successfully stored (must be commutative with
 // other operations, false otherwise.
 func (r *Raft) storeIfCommutative(log *Log) bool {
-	r.witnessState.lock.Lock()
-	defer r.witnessState.lock.Unlock()
+    records, keys := stableGetWitnessState(r.stable)
 
-	// Check if operation involving key already stored at witness.
+	// Check if operation involving key already stored at witness or no
+    // space to store in direct-associative cache.
 	for _, key := range log.Keys {
-		if _, ok := r.witnessState.keys[&key]; ok {
+        hash := getKeyHash(key)
+        if _,ok := keys[hash]; ok {
 			return false
 		}
 	}
 
 	// Add keys separately in case keys included multiple times by client.
 	for _, key := range log.Keys {
-		r.witnessState.keys[&key] = true
+        hash := getKeyHash(key)
+		keys[hash] = key
 	}
 	// Record RPC in witness.
-	clientSeqNo := &ClientSeqNo{
+	clientSeqNo := ClientSeqNo{
 		ClientID: log.ClientID,
 		SeqNo:    log.SeqNo,
 	}
-	r.witnessState.records[clientSeqNo] = log
+	records[clientSeqNo] = *log
 
     // Write updates to stable storage.
-    r.stableSetWitnessState()
+    stableSetWitnessState(r.stable, records, keys)
 
 	return true
 }

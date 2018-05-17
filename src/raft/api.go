@@ -187,9 +187,6 @@ type Raft struct {
 	// is indexed by an artificial ID which is used for deregistration.
 	observersLock sync.RWMutex
 	observers     map[uint64]*Observer
-
-	// State required to maintain witnesses.
-	witnessState witnessState
 }
 
 // BootstrapCluster initializes a server's storage with the given cluster
@@ -226,6 +223,9 @@ func BootstrapCluster(conf *Config, logs LogStore, stable StableStore,
 	if err := stable.SetUint64(keyCurrentTerm, 1); err != nil {
 		return fmt.Errorf("failed to save current term: %v", err)
 	}
+
+    // Set empty maps for witness state
+    stableSetWitnessState(stable, make(map[ClientSeqNo]Log), make(map[uint32]Key))
 
 	// Append configuration entry to log.
 	entry := &Log{
@@ -521,10 +521,6 @@ func NewRaft(conf *Config, fsm FSM, logs LogStore, stable StableStore, snaps Sna
 		configurationsCh:      make(chan *configurationsFuture, 8),
 		bootstrapCh:           make(chan *bootstrapFuture),
 		observers:             make(map[uint64]*Observer),
-		witnessState: witnessState{
-			keys:    make(map[*Key]bool),
-			records: make(map[*ClientSeqNo]*Log),
-		},
 	}
 
 	// Initialize as a follower.
