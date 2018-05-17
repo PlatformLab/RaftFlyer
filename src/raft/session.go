@@ -189,7 +189,7 @@ func (s *Session) SendFastRequestWithSeqNo(data []byte, keys []Key, resp *Client
 			RPCHeader: RPCHeader{
 				ProtocolVersion: ProtocolVersionMax,
 			},
-            Entry: req.Entry,
+			Entry: req.Entry,
 		}
 		var syncResp SyncResponse
 		err := s.sendToActiveLeader(sync, &syncResp, rpcSyncRequest)
@@ -295,7 +295,7 @@ func (s *Session) sendToActiveLeader(request interface{}, response GenericClient
 
 		// If failure, use leader hint or wait for election to complete.
 		if err != nil {
-            if response != nil && response.GetLeaderAddress() != "" { 
+			if response != nil && response.GetLeaderAddress() != "" {
 				s.leader = (s.leader + 1) % len(s.conns)
 				for i, addr := range s.addrs {
 					if addr == response.GetLeaderAddress() {

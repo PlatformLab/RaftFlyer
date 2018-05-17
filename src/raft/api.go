@@ -224,8 +224,8 @@ func BootstrapCluster(conf *Config, logs LogStore, stable StableStore,
 		return fmt.Errorf("failed to save current term: %v", err)
 	}
 
-    // Set empty maps for witness state
-    stableSetWitnessState(stable, make(map[ClientSeqNo]Log), make(map[uint32]Key))
+	// Set empty maps for witness state
+	stableSetWitnessState(stable, make(map[ClientSeqNo]Log), make(map[uint32]Key))
 
 	// Append configuration entry to log.
 	entry := &Log{

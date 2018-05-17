@@ -3,14 +3,14 @@ package raft
 import (
 	"bytes"
 	"container/list"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"github.com/armon/go-metrics"
 	"io"
 	"io/ioutil"
 	"time"
-    "encoding/binary"
-    "crypto/sha256"
 )
 
 const (
@@ -18,11 +18,11 @@ const (
 )
 
 var (
-	keyCurrentTerm  = []byte("CurrentTerm")
-	keyLastVoteTerm = []byte("LastVoteTerm")
-	keyLastVoteCand = []byte("LastVoteCand")
-    keyWitnessStateKeys = []byte("WitnessStateKeys")
-    keyWitnessStateRecords = []byte("WitnessStateRecords")
+	keyCurrentTerm         = []byte("CurrentTerm")
+	keyLastVoteTerm        = []byte("LastVoteTerm")
+	keyLastVoteCand        = []byte("LastVoteCand")
+	keyWitnessStateKeys    = []byte("WitnessStateKeys")
+	keyWitnessStateRecords = []byte("WitnessStateRecords")
 )
 
 // getRPCHeader returns an initialized RPCHeader struct for the given
@@ -283,7 +283,7 @@ func (r *Raft) runCandidate() {
 			// Check if we've become the leader
 			if grantedVotes >= votesNeeded {
 				r.logger.Printf("[INFO] raft: Election won. Tally: %d", grantedVotes)
-                r.setState(Leader)
+				r.setState(Leader)
 				r.setLeader(r.localAddr)
 				return
 			}
@@ -424,8 +424,8 @@ func (r *Raft) runLeader() {
 	}
 	r.dispatchLogs([]*logFuture{noop})
 
-    //TODO: make sure it's safe to replay from witnesses here (can't start having client requests)
-    r.recoverWithWitness()
+	//TODO: make sure it's safe to replay from witnesses here (can't start having client requests)
+	r.recoverWithWitness()
 
 	// Sit in the leader loop until we step down
 	r.leaderLoop()
@@ -481,10 +481,10 @@ func (r *Raft) startStopReplication() {
 // is elected. Witness is set to recovery mode and sends all saved client
 // requests, which are replayed by the new master.
 func (r *Raft) recoverWithWitness() {
-    // Pick a witness.
-    // Send a RecoverDataRequest to witness.
-    // Execute all saved operations synchronously.
-    // (Unfreeze witness?)
+	// Pick a witness.
+	// Send a RecoverDataRequest to witness.
+	// Execute all saved operations synchronously.
+	// (Unfreeze witness?)
 }
 
 // configurationChangeChIfStable returns r.configurationChangeCh if it's safe
@@ -950,16 +950,16 @@ func (r *Raft) processLog(l *Log, future *logFuture) {
 			ClientID: l.ClientID,
 			SeqNo:    l.SeqNo,
 		}
-        // TODO: also need to delete key
-        records, keys := stableGetWitnessState(r.stable)
+		// TODO: also need to delete key
+		records, keys := stableGetWitnessState(r.stable)
 		delete(records, clientSeqNo)
-        for _,key := range l.Keys {
-            hash := getKeyHash(key) 
-            if bytes.Compare(key, keys[hash]) == 0 {
-                delete(keys, hash)
-            }
-        }
-        stableSetWitnessState(r.stable, records, keys)
+		for _, key := range l.Keys {
+			hash := getKeyHash(key)
+			if bytes.Compare(key, keys[hash]) == 0 {
+				delete(keys, hash)
+			}
+		}
+		stableSetWitnessState(r.stable, records, keys)
 
 		// Return so that the future is only responded to
 		// by the FSM handler when the application is done
@@ -993,53 +993,53 @@ func (r *Raft) processLog(l *Log, future *logFuture) {
 //   - key: Key to get hash value of
 // Returns: hash of key
 func getKeyHash(key Key) uint32 {
-    hash := sha256.Sum256(key)
-    hashSlice := hash[:]
-    return binary.LittleEndian.Uint32(hashSlice)
+	hash := sha256.Sum256(key)
+	hashSlice := hash[:]
+	return binary.LittleEndian.Uint32(hashSlice)
 }
 
-// stableSetWitnessStorage writes the witnessState to stable storage. 
-// Should only be called if r.witnessState.Lock is held. Panics if 
+// stableSetWitnessStorage writes the witnessState to stable storage.
+// Should only be called if r.witnessState.Lock is held. Panics if
 // failure.
 func stableSetWitnessState(stable StableStore, records map[ClientSeqNo]Log, keys map[uint32]Key) {
-    recordsBuf, err1 := encodeMsgPack(records)
-    if err1 != nil {
-        panic(fmt.Errorf("failed to encode witness state records: %v", err1))
-    }
-    err2 := stable.Set(keyWitnessStateRecords, recordsBuf.Bytes())
+	recordsBuf, err1 := encodeMsgPack(records)
+	if err1 != nil {
+		panic(fmt.Errorf("failed to encode witness state records: %v", err1))
+	}
+	err2 := stable.Set(keyWitnessStateRecords, recordsBuf.Bytes())
 	if err2 != nil {
-        panic(fmt.Errorf("failed to write witness state records to stable storage: %v", err2))
-    }
-    keysBuf, err3 := encodeMsgPack(keys)
-    if err3 != nil {
-        panic(fmt.Errorf("failed to encode witness state keys: %v", err3))
-    }
-    err4 := stable.Set(keyWitnessStateKeys, keysBuf.Bytes())
+		panic(fmt.Errorf("failed to write witness state records to stable storage: %v", err2))
+	}
+	keysBuf, err3 := encodeMsgPack(keys)
+	if err3 != nil {
+		panic(fmt.Errorf("failed to encode witness state keys: %v", err3))
+	}
+	err4 := stable.Set(keyWitnessStateKeys, keysBuf.Bytes())
 	if err4 != nil {
-        panic(fmt.Errorf("failed to write witness state keys to stable storage: %v", err4))
-    }
+		panic(fmt.Errorf("failed to write witness state keys to stable storage: %v", err4))
+	}
 }
 
 func stableGetWitnessState(stable StableStore) (map[ClientSeqNo]Log, map[uint32]Key) {
-    recordsBuf, err1 := stable.Get(keyWitnessStateRecords)
-    if err1 != nil {
-        panic(fmt.Errorf("failed to read witness state records from stable storage: %v", err1))
-    }
-    records := make(map[ClientSeqNo]Log)
-    err2 := decodeMsgPack(recordsBuf, &records)
-    if err2 != nil {
-        panic(fmt.Errorf("failed to decode witness state records: %v", err2))
-    }
-    keysBuf, err3 := stable.Get(keyWitnessStateKeys)
-    if err3 != nil {
-        panic(fmt.Errorf("failed to read witness state keys from stable storage: %v", err3))
-    }
-    keys := make(map[uint32]Key)
-    err4 := decodeMsgPack(keysBuf, &keys)
-    if err4 != nil {
-        panic(fmt.Errorf("failed to decode witness state keys: %v", err4))
-    }
-    return records, keys
+	recordsBuf, err1 := stable.Get(keyWitnessStateRecords)
+	if err1 != nil {
+		panic(fmt.Errorf("failed to read witness state records from stable storage: %v", err1))
+	}
+	records := make(map[ClientSeqNo]Log)
+	err2 := decodeMsgPack(recordsBuf, &records)
+	if err2 != nil {
+		panic(fmt.Errorf("failed to decode witness state records: %v", err2))
+	}
+	keysBuf, err3 := stable.Get(keyWitnessStateKeys)
+	if err3 != nil {
+		panic(fmt.Errorf("failed to read witness state keys from stable storage: %v", err3))
+	}
+	keys := make(map[uint32]Key)
+	err4 := decodeMsgPack(keysBuf, &keys)
+	if err4 != nil {
+		panic(fmt.Errorf("failed to decode witness state keys: %v", err4))
+	}
+	return records, keys
 }
 
 // processRPC is called to handle an incoming RPC request. This must only be
@@ -1493,15 +1493,15 @@ func (r *Raft) clientIdRequest(rpc RPC, c *ClientIdRequest) {
 }
 
 // Handle a syncRequest from client. Can only be handled at the
-// leader, and required a valid client ID. Synchronously 
+// leader, and required a valid client ID. Synchronously
 // executes the client command.
 // Params:
 //   - rpc: RPC object used to send a response
 //   - sync: Sync Request being handled.
 func (r *Raft) syncRequest(rpc RPC, sync *SyncRequest) {
 	leader := r.Leader()
-    r.logger.Printf("leader: ", leader)
-    resp := &SyncResponse{
+	r.logger.Printf("leader: ", leader)
+	resp := &SyncResponse{
 		Success:       false,
 		LeaderAddress: leader,
 	}
@@ -1519,9 +1519,9 @@ func (r *Raft) syncRequest(rpc RPC, sync *SyncRequest) {
 		// Apply all commands in client request.
 		r.goFunc(func() {
 			var rpcErr error
-            resp.ResponseData = r.applySynchronousCommand(sync.Entry, &rpcErr)
-            resp.Success = true
-            rpc.Respond(resp, rpcErr)
+			resp.ResponseData = r.applySynchronousCommand(sync.Entry, &rpcErr)
+			resp.Success = true
+			rpc.Respond(resp, rpcErr)
 		})
 	} else {
 		resp.Success = false
@@ -1556,7 +1556,6 @@ func (r *Raft) recordRequest(rpc RPC, record *RecordRequest) {
 	}
 }
 
-
 // Check if an operation is commutative with other operations
 // stored at the witness and if this is the case, store it and
 // return true, otherwise return false.
@@ -1565,20 +1564,20 @@ func (r *Raft) recordRequest(rpc RPC, record *RecordRequest) {
 // Return true if successfully stored (must be commutative with
 // other operations, false otherwise.
 func (r *Raft) storeIfCommutative(log *Log) bool {
-    records, keys := stableGetWitnessState(r.stable)
+	records, keys := stableGetWitnessState(r.stable)
 
 	// Check if operation involving key already stored at witness or no
-    // space to store in direct-associative cache.
+	// space to store in direct-associative cache.
 	for _, key := range log.Keys {
-        hash := getKeyHash(key)
-        if _,ok := keys[hash]; ok {
+		hash := getKeyHash(key)
+		if _, ok := keys[hash]; ok {
 			return false
 		}
 	}
 
 	// Add keys separately in case keys included multiple times by client.
 	for _, key := range log.Keys {
-        hash := getKeyHash(key)
+		hash := getKeyHash(key)
 		keys[hash] = key
 	}
 	// Record RPC in witness.
@@ -1588,8 +1587,8 @@ func (r *Raft) storeIfCommutative(log *Log) bool {
 	}
 	records[clientSeqNo] = *log
 
-    // Write updates to stable storage.
-    stableSetWitnessState(r.stable, records, keys)
+	// Write updates to stable storage.
+	stableSetWitnessState(r.stable, records, keys)
 
 	return true
 }
@@ -1630,7 +1629,6 @@ func (r *Raft) clientRequest(rpc RPC, c *ClientRequest) {
 	}
 }
 
-
 // Apply a command locally if it is commutative (not synced) or
 // replicate to followers (synced). Sets fields in resp based on
 // execution of request and if synced.
@@ -1642,14 +1640,14 @@ func (r *Raft) applyCommand(log *Log, resp *ClientResponse, rpcErr *error) {
 	commutative := r.storeIfCommutative(log)
 	if commutative {
 		// Apply locally, store in witness cache, and respond
-        resp.ResponseData = r.applyCommutativeCommand(log, rpcErr)
-        resp.Synced = false
+		resp.ResponseData = r.applyCommutativeCommand(log, rpcErr)
+		resp.Synced = false
 	} else {
 		// Sync all previous requests and execute this request synchronously.
-        resp.ResponseData = r.applySynchronousCommand(log, rpcErr)
+		resp.ResponseData = r.applySynchronousCommand(log, rpcErr)
 		resp.Synced = true
 	}
-    resp.LeaderAddress = r.Leader()
+	resp.LeaderAddress = r.Leader()
 }
 
 // Apply a command locally. Should only be called by the leader if
@@ -1666,12 +1664,12 @@ func (r *Raft) applyCommutativeCommand(log *Log, rpcErr *error) []byte {
 	data, _ := json.Marshal(response)
 	// Replicate to client asynchronously
 	r.goFunc(func() { r.Apply(log, 0) })
-    return data
+	return data
 }
 
 // Replicate a command to followers. Should be called if leader has
 // confirmed that an operation is not commutative.
-// Params: 
+// Params:
 //   - log: Log entry to apply commutatively, type LogCommand.
 //   - rpcErr: Pointer to error to set if necessary.
 // Returns: byte array containing reponse to applying command.
@@ -1682,7 +1680,7 @@ func (r *Raft) applySynchronousCommand(log *Log, rpcErr *error) []byte {
 		*rpcErr = f.Error()
 	}
 	data, _ := json.Marshal(f.Response())
-    return data
+	return data
 }
 
 // setLastContact is used to set the last contact time to now
