@@ -237,7 +237,7 @@ type RecoveryDataResponse struct {
 	RPCHeader
 
 	// All client requests stored at witness.
-	Entries []*Log
+	Entries []Log
 }
 
 // See WithRPCHeader.

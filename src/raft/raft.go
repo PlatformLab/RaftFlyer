@@ -505,7 +505,7 @@ func (r *Raft) recoverWithWitness() {
     for _, entry := range resp.Entries {
         var err error
         // Can disregard return value.
-        r.applySynchronousCommand(entry, &err)
+        r.applySynchronousCommand(&entry, &err)
         if err != nil {
             r.logger.Printf("[ERR] Error executing operation retrieved from witness")
         }
@@ -1094,6 +1094,10 @@ func (r *Raft) processRPC(rpc RPC) {
 		r.recordRequest(rpc, cmd)
 	case *SyncRequest:
 		r.syncRequest(rpc, cmd)
+    case *RecoveryDataRequest:
+        r.recoveryDataRequest(rpc, cmd)
+    case *UnfreezeRequest:
+        r.unfreezeRequest(rpc, cmd)
 	case *ClientRequest:
 		r.clientRequest(rpc, cmd)
 	case *ClientIdRequest:
@@ -1494,6 +1498,42 @@ func (r *Raft) installSnapshot(rpc RPC, req *InstallSnapshotRequest) {
 	return
 }
 
+// Handle a recoveryDataRequest from new leader to witness. Returns
+// all entries stored at witness and freezes witness until unfreeze
+// request is sent.
+// Params:
+//   - rpc: RPC object used to send a response.
+//   - req: Recovery DAta Request being handled.
+func (r *Raft) recoveryDataRequest(rpc RPC, req *RecoveryDataRequest) {
+    logMap,_ := stableGetWitnessState(r.stable)
+    logs := make([]Log, 0)
+    for _,log := range logMap {
+        logs = append(logs, log)
+    }
+    resp := &RecoveryDataResponse {
+        RPCHeader: r.getRPCHeader(),
+        Entries: logs,
+    }
+    r.frozenLock.Lock()
+    r.frozen = true
+    r.frozenLock.Unlock()
+    rpc.Respond(resp, nil)
+}
+
+// Handle a unfreezeRequest from new leader to witness. Sent after
+// recoveryDataRequest to allow witness to start receiving client
+// record requests again.
+func (r *Raft) unfreezeRequest(rpc RPC, req *UnfreezeRequest) {
+    r.frozenLock.Lock()
+    r.frozen = false
+    r.frozenLock.Unlock()
+    resp := &UnfreezeResponse {
+        RPCHeader: r.getRPCHeader(),
+
+    }
+    rpc.Respond(resp, nil)
+}
+
 // Handle a clientIdRequest from client. Can only be handled at
 // the leader. Assigns a new client ID and replicates the client
 // ID to followers.
@@ -1574,6 +1614,18 @@ func (r *Raft) recordRequest(rpc RPC, record *RecordRequest) {
 		rpc.Respond(resp, ErrNotWitness)
 		return
 	}
+
+    // Can't accept record request if frozen.
+    r.frozenLock.RLock()
+    isFrozen := r.frozen
+    r.frozenLock.RUnlock()
+    if isFrozen {
+        resp := &RecordResponse {
+            Success: false,
+        }
+        rpc.Respond(resp, ErrWitnessFrozen)
+        return
+    }
 
 	success := r.storeIfCommutative(record.Entry)
 	r.logger.Printf("witness says client req is commutative: %b", success)

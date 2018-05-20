@@ -70,6 +70,10 @@ var (
 	// ErrNoActiveLeader is returned when a client tries to contact a leader
 	// and cannot reach an active leader.
 	ErrNoActiveLeader = errors.New("no active leader found")
+
+    // ErrWitnessFrozen is returned when a client tries to record a command
+    // in a witness that cannot accept client record requests.
+    ErrWitnessFrozen = errors.New("witness cannot accept record request, frozen")
 )
 
 // Raft implements a Raft node.
@@ -102,6 +106,10 @@ type Raft struct {
 
 	// fsmSnapshotCh is used to trigger a new snapshot being taken
 	fsmSnapshotCh chan *reqSnapshotFuture
+
+    // True if witness can't accept client record requests, false otherwise.
+    frozen bool
+    frozenLock sync.RWMutex
 
 	// lastContact is the last time we had contact from the
 	// leader node. This can be used to gauge staleness.
@@ -499,7 +507,8 @@ func NewRaft(conf *Config, fsm FSM, logs LogStore, stable StableStore, snaps Sna
 		applyCh:             make(chan *logFuture),
 		conf:                *conf,
 		clientResponseCache: make(map[uint64]map[uint64]clientResponseEntry),
-		fsm:                 fsm,
+        frozen:              false,
+        fsm:                 fsm,
 		fsmMutateCh:         make(chan interface{}, 128),
 		fsmSnapshotCh:       make(chan *reqSnapshotFuture),
 		leaderCh:            make(chan bool),
