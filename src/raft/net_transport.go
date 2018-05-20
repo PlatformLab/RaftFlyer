@@ -18,7 +18,11 @@ const (
 	rpcAppendEntries uint8 = iota
 	rpcRequestVote
 	rpcInstallSnapshot
-	rpcClientRequest
+	rpcRecoverDataRequest
+    rpcRecoverDataResponse
+    rpcUnfreezeRequest
+    rpcUnfreezeResponse
+    rpcClientRequest
 	rpcClientResponse
 	rpcClientIdRequest
 	rpcClientIdResponse
@@ -342,6 +346,16 @@ func (n *NetworkTransport) RequestVote(id ServerID, target ServerAddress, args *
 	return n.genericRPC(id, target, rpcRequestVote, args, resp)
 }
 
+// RecoverData implements the Transport interface.
+func (n *NetworkTransport) RecoverData(id ServerID, target ServerAddress, args *RecoveryDataRequest, resp *RecoveryDataResponse) error {
+    return n.genericRPC(id, target, rpcRecoverDataRequest, args, resp)
+}
+
+// UnfreezeWitness implements the Transport interface.
+func (n *NetworkTransport) UnfreezeWitness(id ServerID, target ServerAddress, args *UnfreezeRequest, resp *UnfreezeResponse) error {
+    return n.genericRPC(id, target, rpcUnfreezeRequest, args, resp)
+}
+
 // genericRPC handles a simple request/response RPC.
 func (n *NetworkTransport) genericRPC(id ServerID, target ServerAddress, rpcType uint8, args interface{}, resp interface{}) error {
 	// Get a conn
@@ -518,6 +532,13 @@ func (n *NetworkTransport) handleCommand(r *bufio.Reader, dec *codec.Decoder, en
 			return err
 		}
 		rpc.Command = &req
+
+    case rpcRecoverDataRequest:
+        var req RecoveryDataRequest
+        if err := dec.Decode(&req); err != nil {
+            return err
+        }
+        rpc.Command = &req
 
 	case rpcClientRequest:
 		var req ClientRequest

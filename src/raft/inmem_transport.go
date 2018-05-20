@@ -115,6 +115,34 @@ func (i *InmemTransport) RequestVote(id ServerID, target ServerAddress, args *Re
 	return nil
 }
 
+// RecoverData implements the Transport interface.
+func (i *InmemTransport) RecoverData(id ServerID, target ServerAddress, args *RecoveryDataRequest, resp *RecoveryDataResponse) error {
+	rpcResp, err := i.makeRPC(target, args, nil, i.timeout)
+	if err != nil {
+		return err
+	}
+
+	// Copy the result back
+	out := rpcResp.Response.(*RecoveryDataResponse)
+	*resp = *out
+	return nil
+}
+
+// UnfreezeWitness implements the Transport interface.
+func (i *InmemTransport) UnfreezeWitness(id ServerID, target ServerAddress, args *UnfreezeRequest, resp *UnfreezeResponse) error {
+	rpcResp, err := i.makeRPC(target, args, nil, i.timeout)
+	if err != nil {
+		return err
+	}
+
+	// Copy the result back
+	out := rpcResp.Response.(*UnfreezeResponse)
+	*resp = *out
+	return nil
+}
+
+
+
 // InstallSnapshot implements the Transport interface.
 func (i *InmemTransport) InstallSnapshot(id ServerID, target ServerAddress, args *InstallSnapshotRequest, resp *InstallSnapshotResponse, data io.Reader) error {
 	rpcResp, err := i.makeRPC(target, args, data, 10*i.timeout)

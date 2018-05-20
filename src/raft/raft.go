@@ -481,10 +481,43 @@ func (r *Raft) startStopReplication() {
 // is elected. Witness is set to recovery mode and sends all saved client
 // requests, which are replayed by the new master.
 func (r *Raft) recoverWithWitness() {
-	// Pick a witness.
-	// Send a RecoverDataRequest to witness.
+	// Construct request.
+    req := &RecoveryDataRequest{
+        RPCHeader:  r.getRPCHeader(),
+    }
+    resp := &RecoveryDataResponse{}
+    // Choose witness and send RecoveryDataRequest.
+    var chosenWitness Server
+    for _, witness := range r.configurations.latest.Servers {
+        if witness.ID == r.localID {
+            // Don't choose self to recover from.
+            continue
+        }
+        err := r.trans.RecoverData(witness.ID, witness.Address, req, resp)
+        if err == nil {
+            chosenWitness = witness
+            break
+        }
+        // Cannot recover from this witness.
+        r.logger.Printf("[ERR] Failed to recover from witness %v: %v", witness, err)
+    }
 	// Execute all saved operations synchronously.
-	// (Unfreeze witness?)
+    for _, entry := range resp.Entries {
+        var err error
+        // Can disregard return value.
+        r.applySynchronousCommand(entry, &err)
+        if err != nil {
+            r.logger.Printf("[ERR] Error executing operation retrieved from witness")
+        }
+    }
+    // Unfreeze witness
+    unfreezeReq := &UnfreezeRequest{
+        RPCHeader: r.getRPCHeader(),
+    }
+    err := r.trans.UnfreezeWitness(chosenWitness.ID, chosenWitness.Address, unfreezeReq, &UnfreezeResponse{})
+    if err != nil {
+        r.logger.Printf("[ERR] Failed to unfreeze witness %v: %v", chosenWitness, err)
+    }
 }
 
 // configurationChangeChIfStable returns r.configurationChangeCh if it's safe

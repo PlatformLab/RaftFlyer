@@ -245,6 +245,26 @@ func (r *RecoveryDataResponse) GetRPCHeader() RPCHeader {
 	return r.RPCHeader
 }
 
+// Unfreeze witness to allow it to process record requests again.
+type UnfreezeRequest struct {
+    RPCHeader
+}
+
+// See WithRPCHeader.
+func (r *UnfreezeRequest) GetRPCHeader() RPCHeader {
+    return r.RPCHeader
+}
+
+// Response to UnfreezeRequest (see UnfreezeRequest).
+type UnfreezeResponse struct {
+    RPCHeader
+}
+
+// Ssee WithRPCHeader.
+func (r *UnfreezeResponse) GetRPCHeader() RPCHeader {
+    return r.RPCHeader
+}
+
 // Sent by the client to apply a command at a raft cluster.
 type ClientRequest struct {
 	RPCHeader

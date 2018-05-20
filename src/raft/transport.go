@@ -43,6 +43,13 @@ type Transport interface {
 	// RequestVote sends the appropriate RPC to the target node.
 	RequestVote(id ServerID, target ServerAddress, args *RequestVoteRequest, resp *RequestVoteResponse) error
 
+    // RecoverData sends the appropriate RPC to the target node.
+	RecoverData(id ServerID, target ServerAddress, args *RecoveryDataRequest, resp *RecoveryDataResponse) error
+
+    // RequestVote sends the appropriate RPC to the target node.
+	UnfreezeWitness(id ServerID, target ServerAddress, args *UnfreezeRequest, resp *UnfreezeResponse) error
+
+
 	// InstallSnapshot is used to push a snapshot down to a follower. The data is read from
 	// the ReadCloser and streamed to the client.
 	InstallSnapshot(id ServerID, target ServerAddress, args *InstallSnapshotRequest, resp *InstallSnapshotResponse, data io.Reader) error
