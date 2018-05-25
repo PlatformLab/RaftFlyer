@@ -26,7 +26,10 @@ type Session struct {
 	// Leader is index into conns or addrs arrays.
 	leader     int
 	leaderLock sync.RWMutex
-	// Addresses of all Raft servers.
+    // Term tracks the current Raft term to avoid stale witnesses.
+    term uint64
+    termLock sync.RWMutex
+    // Addresses of all Raft servers.
 	addrs []ServerAddress
 	// Client ID assigned by cluster for use in RIFL.
 	clientID uint64
@@ -208,12 +211,17 @@ func (s *Session) SendFastRequestWithSeqNo(data []byte, keys []Key, resp *Client
 //   - entry: Log entry to send to all witnesses.
 //   - resultCh: channel to put completion status into.
 func (s *Session) sendToAllWitnesses(entry *Log, resultCh *chan bool) {
-	req := &RecordRequest{
+	s.termLock.RLock()
+    term := s.term
+    s.termLock.RUnlock()
+
+    req := &RecordRequest{
 		RPCHeader: RPCHeader{
 			ProtocolVersion: ProtocolVersionMax,
 		},
 		Entry: entry,
-	}
+        Term: term,
+    }
 
 	// Send to all witnesses.
 	for i := range s.conns {
@@ -246,7 +254,15 @@ func (s *Session) sendToWitness(id int, req *RecordRequest) bool {
 	resp := &RecordResponse{}
 	_, err = decodeResponse(s.conns[id].conn, resp)
 	s.conns[id].lock.Unlock()
-	if err != nil || !resp.Success {
+
+    // Update term if found new term.
+    s.termLock.Lock()
+    if resp.Term > s.term {
+        s.term = resp.Term
+    }
+    s.termLock.Unlock()
+
+    if err != nil || !resp.Success {
 		return false
 	}
 	return true

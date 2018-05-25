@@ -158,6 +158,8 @@ type RecordRequest struct {
 
 	// Entry to commit
 	Entry *Log
+    // Use term to make sure witness is valid.
+    Term uint64
 }
 
 // See WithRPCHeader.
@@ -173,6 +175,8 @@ type RecordResponse struct {
 
 	// True if operation recorded at witness, false otherwise.
 	Success bool
+    // Discover term if term not correct.
+    Term uint64
 }
 
 // See WithRPCHeader.

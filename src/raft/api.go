@@ -74,6 +74,11 @@ var (
     // ErrWitnessFrozen is returned when a client tries to record a command
     // in a witness that cannot accept client record requests.
     ErrWitnessFrozen = errors.New("witness cannot accept record request, frozen")
+
+    // ErrStaleTerm is returned when a client tries to record a command in
+    // a witness using a stale term number, meaning that it is sending the
+    // command to a potentially stale set of witnesses.
+    ErrStaleTerm = errors.New("witness cannot accept record request with stale term")
 )
 
 // Raft implements a Raft node.

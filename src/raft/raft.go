@@ -1627,6 +1627,15 @@ func (r *Raft) recordRequest(rpc RPC, record *RecordRequest) {
         return
     }
 
+    // Can't accept record request if sending to stale set of witnesses.
+    if record.Term < r.getCurrentTerm() {
+        resp := &RecordResponse {
+            Success: false,
+        }
+        rpc.Respond(resp, ErrStaleTerm)
+        return
+    }
+
 	success := r.storeIfCommutative(record.Entry)
 	r.logger.Printf("witness says client req is commutative: %b", success)
 	// Respond to client.
