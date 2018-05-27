@@ -486,8 +486,12 @@ func (r *Raft) recoverWithWitness() {
         RPCHeader:  r.getRPCHeader(),
     }
     resp := &RecoveryDataResponse{}
-    // Choose witness and send RecoveryDataRequest.
-    var chosenWitness Server
+    // when get it count, at teh end iterate over and if have >= ceil(f/2) + 1 counts then can commit
+    entryCounts := make(map[uint64]map[uint64]uint64, 0)
+    uniqueEntries := make(map[uint64]map[uint64]Log)
+    // Choose f+1 witnesses and send RecoveryDataRequest.
+    quorumSz := len(r.configurations.latest.Servers) / 2 + 1
+    chosenWitnesses := make([]Server, 0)
     for _, witness := range r.configurations.latest.Servers {
         if witness.ID == r.localID {
             // Don't choose self to recover from.
@@ -495,28 +499,49 @@ func (r *Raft) recoverWithWitness() {
         }
         err := r.trans.RecoverData(witness.ID, witness.Address, req, resp)
         if err == nil {
-            chosenWitness = witness
+            chosenWitnesses = append(chosenWitnesses, witness)
+            for _,entry := range resp.Entries {
+                if entryCounts[entry.ClientID] == nil {
+                    entryCounts[entry.ClientID] = make(map[uint64]uint64)
+                    uniqueEntries[entry.ClientID] = make(map[uint64]Log)
+                }
+                entryCounts[entry.ClientID][entry.SeqNo] += 1  // initialized to 0
+                uniqueEntries[entry.ClientID][entry.SeqNo] = entry
+            }
+        } else {
+            // Cannot recover from this witness.
+            r.logger.Printf("[ERR] Failed to recover from witness %v: %v", witness, err)
+        }
+        // Contacted a quorum. Can assume will always reach this state (otherwise couldn't elect leader).
+        if len(chosenWitnesses) == quorumSz {
             break
         }
-        // Cannot recover from this witness.
-        r.logger.Printf("[ERR] Failed to recover from witness %v: %v", witness, err)
     }
-	// Execute all saved operations synchronously.
-    for _, entry := range resp.Entries {
-        var err error
-        // Can disregard return value.
-        r.applySynchronousCommand(&entry, &err)
-        if err != nil {
-            r.logger.Printf("[ERR] Error executing operation retrieved from witness")
+	// Execute operations that are stored at ceil(f/2) + 1 witnesses synchronously.
+    minMajoritySz := (quorumSz / 2) + 1
+    for clientID := range entryCounts {
+        for seqNo := range entryCounts[clientID] {
+            if entryCounts[clientID][seqNo] < uint64(minMajoritySz) {
+                continue
+            }
+            entry := uniqueEntries[clientID][seqNo]
+            var err error
+            // Can disregard return value.
+            r.applySynchronousCommand(&entry, &err)
+            if err != nil {
+                r.logger.Printf("[ERR] Error executing operation retrieved from witness")
+            }
         }
     }
-    // Unfreeze witness
-    unfreezeReq := &UnfreezeRequest{
-        RPCHeader: r.getRPCHeader(),
-    }
-    err := r.trans.UnfreezeWitness(chosenWitness.ID, chosenWitness.Address, unfreezeReq, &UnfreezeResponse{})
-    if err != nil {
-        r.logger.Printf("[ERR] Failed to unfreeze witness %v: %v", chosenWitness, err)
+    for _,chosenWitness := range chosenWitnesses {
+        // Unfreeze all chosen f+1 witnesses.
+        unfreezeReq := &UnfreezeRequest{
+            RPCHeader: r.getRPCHeader(),
+        }
+        err := r.trans.UnfreezeWitness(chosenWitness.ID, chosenWitness.Address, unfreezeReq, &UnfreezeResponse{})
+        if err != nil {
+            r.logger.Printf("[ERR] Failed to unfreeze witness %v: %v", chosenWitness, err)
+        }
     }
 }
 
