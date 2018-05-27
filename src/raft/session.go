@@ -4,6 +4,7 @@ import (
 	"errors"
 	"sync"
 	"time"
+    "math"
 )
 
 // Client library for Raft. Provides session abstraction that handles starting
@@ -35,6 +36,8 @@ type Session struct {
 	clientID uint64
 	// Sequence number of next RPC for use in RIFL.
 	rpcSeqNo uint64
+    // Size of superquorum (number of witnesses need to record commutative operation in).
+    superquorumSz int
 }
 
 // Open client session to cluster.
@@ -50,6 +53,8 @@ func CreateClientSession(trans *NetworkTransport, addrs []ServerAddress) (*Sessi
 		addrs:    addrs,
 		rpcSeqNo: 0,
 	}
+    f := len(addrs) / 2     // Raft needs 2f+1 replicas
+    session.superquorumSz = f + int(math.Ceil(float64(f)/2.0)) + 1
 
 	// Initialize syncedConn array.
 	for i := range session.conns {
@@ -179,7 +184,8 @@ func (s *Session) SendFastRequestWithSeqNo(data []byte, keys []Key, resp *Client
 
 		success := true
 
-		for i := 0; i <= len(s.addrs); i += 1 { // TODO: should this be len + 1?
+        // Wait for superquorum to respond.
+		for i := 0; i <= s.superquorumSz; i += 1 { // TODO: should this be len + 1?
 			result := <-resultCh
 			success = success && result
 			// TODO: if synced, automatically succeed, otherwise if not success need to retry
