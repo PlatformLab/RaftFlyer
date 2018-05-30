@@ -54,6 +54,20 @@ func testSimultaneousCommutative() (error) {
     if err2 != nil {
         return fmt.Errorf("Error sending simultaneous commutative requests: %v", err2)
     }
+    result1, err3 := c1.Get("foo")
+    result2, err4 := c2.Get("bar")
+    if err3 != nil {
+        return fmt.Errorf("Error checking result of simultaneous commutative request: %s", err3)
+    }
+    if err4 != nil {
+        return fmt.Errorf("Error checking result of simultaneous commutative request: %s", err4)
+    }
+    if result1 != "1" {
+        return fmt.Errorf("Error with simultaneous commutative request for foo: expected 1 but received %d", result1)
+    }
+    if result2 != "1" {
+        return fmt.Errorf("Error with simultaneous commutative request for bar: expected 1 but received %d", result2)
+    }
     return nil
 }
 
@@ -72,6 +86,13 @@ func testSimultaneousNotCommutative() (error) {
     }
     if err2 != nil {
         return fmt.Errorf("Error sending simultaneous non-commutative requests: %v", err2)
+    }
+    result, err3 := c1.Get("foo")
+    if err3 != nil {
+        return fmt.Errorf("Error checking result of simultaneous non-commutative request: %s", err3)
+    }
+    if result != "1" {
+        return fmt.Errorf("Error in non-commutative operation: expected 1 and got %s", result)
     }
     return nil
 }
