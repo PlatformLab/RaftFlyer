@@ -1109,3 +1109,8 @@ func (r *Raft) LastIndex() uint64 {
 func (r *Raft) AppliedIndex() uint64 {
 	return r.getLastApplied()
 }
+
+// Checks if raft node is the current leader.
+func (r *Raft) IsLeader() bool {
+    return r.getState() == Leader
+}
