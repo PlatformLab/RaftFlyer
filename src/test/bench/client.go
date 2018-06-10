@@ -31,7 +31,7 @@ func main() {
 
     config, err := utils.ReadConfig(*configPathPtr)
     if err != nil {
-        fmt.Fprintf(os.Stderr, "Error reading config at ", *configPathPtr, ": ", err)
+        fmt.Fprintf(os.Stderr, "Error reading config at %s: %s", *configPathPtr, err)
         return
     }
     servers := config.Servers

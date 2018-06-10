@@ -159,6 +159,65 @@ func MakeCluster(n int, fsms []raft.FSM, addrs []raft.ServerAddress, gcInterval 
     return c
 }
 
+// Start single node
+func StartNode(fsm raft.FSM, addrs []raft.ServerAddress, i int) {
+    conf := raft.DefaultConfig()
+    bootstrap := true
+
+	// Setup the stores and transports
+    dir, err := ioutil.TempDir("", "raft")
+	if err != nil {
+		fmt.Println("[ERR] err: %v ", err)
+	}
+
+    file, err := ioutil.TempFile(dir, "log")
+    if err != nil {
+        fmt.Println("[ERR] err creating log: %v ", err)
+    }
+
+	store, err := raftboltdb.NewBoltStore(file.Name())
+    if err != nil {
+        fmt.Println("[ERR] err creating store: ", err)
+    }
+
+    snap, err := raft.NewFileSnapshotStore(dir, 3, nil)
+
+    trans, err := raft.NewTCPTransport(string(addrs[i]), nil, 2, time.Second, nil)
+    if err != nil {
+        fmt.Println("[ERR] err creating transport: ", err)
+    }
+    configuration := raft.Configuration{}
+
+    for _,addr := range addrs {
+        configuration.Servers = append(configuration.Servers, raft.Server{
+            Suffrage:   raft.Voter,
+            ID:         raft.ServerID(fmt.Sprintf("server-%s", addr)),
+            Address:    addr,
+        })
+    }
+
+	// Create all the rafts
+	logs := store
+
+	conf.LocalID = configuration.Servers[i].ID
+    conf.Logger = log.New(os.Stdout, string(conf.LocalID) + " : ", log.Lmicroseconds)
+
+	if bootstrap {
+		err := raft.BootstrapCluster(conf, logs, store, snap, trans, configuration)
+		if err != nil {
+			fmt.Println("[ERR] BootstrapCluster failed: %v", err)
+		}
+	}
+
+	raft, err := raft.NewRaft(conf, fsm, logs, store, snap, trans)
+	if err != nil {
+		fmt.Println("[ERR] NewRaft failed: %v", err)
+	}
+
+	raft.AddVoter(conf.LocalID, trans.LocalAddr(), 0, 0)
+}
+
+
 // Representation of cluster.
 type cluster struct {
 	dirs             []string
