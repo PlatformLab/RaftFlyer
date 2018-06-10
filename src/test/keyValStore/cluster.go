@@ -7,6 +7,7 @@ import(
 	"time"
 	"log"
 	"os"
+    "raft-boltdb"
 )
 
 // Manage keyValStore cluster locally, including making a new cluster, 
@@ -98,7 +99,15 @@ func MakeCluster(n int, fsms []raft.FSM, addrs []raft.ServerAddress, gcInterval 
 			fmt.Println("[ERR] err: %v ", err)
 		}
 
-		store := raft.NewInmemStore()
+        file, err := ioutil.TempFile(dir, "log")
+        if err != nil {
+            fmt.Println("[ERR] err creating log: %v ", err)
+        }
+
+		store, err := raftboltdb.NewBoltStore(file.Name())
+        if err != nil {
+            fmt.Println("[ERR] err creating store: ", err)
+        }
 		c.dirs = append(c.dirs, dir)
 		c.stores = append(c.stores, store)
         c.fsms = append(c.fsms, fsms[i])
@@ -153,7 +162,7 @@ func MakeCluster(n int, fsms []raft.FSM, addrs []raft.ServerAddress, gcInterval 
 // Representation of cluster.
 type cluster struct {
 	dirs             []string
-	stores           []*raft.InmemStore
+	stores           []*raftboltdb.BoltStore
 	fsms             []raft.FSM
 	snaps            []*raft.FileSnapshotStore
 	trans            []raft.Transport
