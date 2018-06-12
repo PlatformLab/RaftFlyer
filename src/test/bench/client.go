@@ -8,7 +8,6 @@ import (
     "flag"
     "test/utils"
     "time"
-    "strconv"
 )
 
 // Arguments:
@@ -64,8 +63,6 @@ func main() {
 }
 
 func runClient(t int, n int, commPercent int, addr string, servers []raft.ServerAddress, parallel bool, results *chan int64) {
-    port := 5000 + t
-    addr = addr + ":" + strconv.Itoa(port)
     trans, err := raft.NewTCPTransport(addr, nil, 2, time.Second, nil)
     if err != nil {
         fmt.Fprintf(os.Stderr, "Error creating TCP transport: %s", err)
