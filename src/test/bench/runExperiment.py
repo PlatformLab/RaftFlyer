@@ -32,7 +32,7 @@ def runExper(config, clients, numThreads, numReqs, parallel, percentCommutative)
     # Start Raft clients
     clientProcesses = []
     for client in clients:
-        clientCmd = "ssh rc%s \"fuser -k %s/tcp; ./RaftFlyer/src/test/bench/client -config=%s -addr=%s -comm=%d -n=%d -parallel=%s -t=%d\"" % (ipAddrToMachineNum(client), getPortNum(client), config, client, percentCommutative, numReqs, str(parallel), numThreads)
+        clientCmd = "ssh rc%s \"fuser -k %s/tcp; ./RaftFlyer/src/test/bench/client -config=%s -addr=%s -comm=%d -n=%d -parallel=%s\"" % (ipAddrToMachineNum(client), getPortNum(client), config, client, percentCommutative, numReqs, str(parallel))
         print "CLIENT CMD"
         print clientCmd
         process = subprocess.Popen(clientCmd, shell=True, stdout=subprocess.PIPE)
