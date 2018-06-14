@@ -470,6 +470,7 @@ func NewRaft(conf *Config, fsm FSM, logs LogStore, stable StableStore, snaps Sna
 		logger = conf.Logger
 	} else {
 		if conf.LogOutput == nil {
+            //devNull = open(os.devnull, 'w')
 			conf.LogOutput = os.Stderr
 		}
 		logger = log.New(conf.LogOutput, "", log.LstdFlags)

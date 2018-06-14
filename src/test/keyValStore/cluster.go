@@ -160,6 +160,7 @@ func MakeCluster(n int, fsms []raft.FSM, addrs []raft.ServerAddress, gcInterval 
 }
 
 // Start single node
+// Used for perf metrics, so don't write logging messages.
 func StartNode(fsm raft.FSM, addrs []raft.ServerAddress, i int) {
     conf := raft.DefaultConfig()
     bootstrap := true
@@ -200,7 +201,9 @@ func StartNode(fsm raft.FSM, addrs []raft.ServerAddress, i int) {
 	logs := store
 
 	conf.LocalID = configuration.Servers[i].ID
+    //conf.Logger = log.SetOutput(ioutil.Discard) 
     conf.Logger = log.New(os.Stdout, string(conf.LocalID) + " : ", log.Lmicroseconds)
+    conf.Logger.SetOutput(ioutil.Discard)
 
 	if bootstrap {
 		err := raft.BootstrapCluster(conf, logs, store, snap, trans, configuration)
