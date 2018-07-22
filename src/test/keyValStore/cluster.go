@@ -99,16 +99,8 @@ func MakeCluster(n int, fsms []raft.FSM, addrs []raft.ServerAddress, gcInterval 
 			fmt.Println("[ERR] err: %v ", err)
 		}
 
-        file, err := ioutil.TempFile(dir, "log")
-        if err != nil {
-            fmt.Println("[ERR] err creating log: %v ", err)
-        }
-
-		store, err := raftboltdb.NewBoltStore(file.Name())
-        if err != nil {
-            fmt.Println("[ERR] err creating store: ", err)
-        }
-		c.dirs = append(c.dirs, dir)
+        store := raft.NewInmemStore()
+        c.dirs = append(c.dirs, dir)
 		c.stores = append(c.stores, store)
         c.fsms = append(c.fsms, fsms[i])
 
@@ -224,7 +216,7 @@ func StartNode(fsm raft.FSM, addrs []raft.ServerAddress, i int) {
 // Representation of cluster.
 type cluster struct {
 	dirs             []string
-	stores           []*raftboltdb.BoltStore
+	stores           []*raft.InmemStore
 	fsms             []raft.FSM
 	snaps            []*raft.FileSnapshotStore
 	trans            []raft.Transport
