@@ -7,7 +7,6 @@ import(
 	"time"
 	"log"
 	"os"
-    "raft-boltdb"
 )
 
 // Manage keyValStore cluster locally, including making a new cluster, 
@@ -163,15 +162,7 @@ func StartNode(fsm raft.FSM, addrs []raft.ServerAddress, i int) {
 		fmt.Println("[ERR] err: %v ", err)
 	}
 
-    file, err := ioutil.TempFile(dir, "log")
-    if err != nil {
-        fmt.Println("[ERR] err creating log: %v ", err)
-    }
-
-	store, err := raftboltdb.NewBoltStore(file.Name())
-    if err != nil {
-        fmt.Println("[ERR] err creating store: ", err)
-    }
+	store := raft.NewInmemStore()
 
     snap, err := raft.NewFileSnapshotStore(dir, 3, nil)
 
