@@ -19,7 +19,7 @@ for i in range(1, maxThreads):
             tempClients.append(client + ":" + str(5000 + j))
     avgThroughput = 0
     avgLatency = 0
-    latencies, throughput = runExper("/home/evd/RaftFlyer/src/test/bench/config", tempClients, 1, 100, True, int(commPercent))
+    latencies, throughput = runExper("/home/evd/RaftFlyer/src/test/bench/config", tempClients, 100, True, int(commPercent))
     latencies = np.array(latencies, dtype=np.int32)
     throughputList.append(throughput)
     latencyList.append(np.mean(latencies))

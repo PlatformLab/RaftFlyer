@@ -14,7 +14,7 @@ def getPortNum(ipAddr):
     print "port: %s" % port
     return port
 
-def runExper(config, clients, numThreads, numReqs, parallel, percentCommutative):
+def runExper(config, clients, numReqs, parallel, percentCommutative):
     # Read config
     f = open(config, 'r')
     servers = f.readlines()
@@ -23,8 +23,6 @@ def runExper(config, clients, numThreads, numReqs, parallel, percentCommutative)
     serverProcesses = []
     for i in range(len(servers)):
         serverCmd = "ssh rc%s \"fuser -k %s/tcp; ./RaftFlyer/src/test/bench/server -config=%s -i=%s\"" % (ipAddrToMachineNum(servers[i]), getPortNum(servers[i]), config, i)
-        print "SERVER CMD"
-        print serverCmd
         process = subprocess.Popen(serverCmd, shell=True)
         serverProcesses.append(process)
     time.sleep(0.5)     # Allow time to reach stability
@@ -33,8 +31,6 @@ def runExper(config, clients, numThreads, numReqs, parallel, percentCommutative)
     clientProcesses = []
     for client in clients:
         clientCmd = "ssh rc%s \"fuser -k %s/tcp; ./RaftFlyer/src/test/bench/client -config=%s -addr=%s -comm=%d -n=%d -parallel=%s\"" % (ipAddrToMachineNum(client), getPortNum(client), config, client, percentCommutative, numReqs, str(parallel))
-        print "CLIENT CMD"
-        print clientCmd
         process = subprocess.Popen(clientCmd, shell=True, stdout=subprocess.PIPE)
         clientProcesses.append(process)
 
