@@ -3,13 +3,14 @@ package raft
 import (
 	"bytes"
 	"container/list"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/json"
 	"fmt"
+	"github.com/armon/go-metrics"
 	"io"
 	"io/ioutil"
 	"time"
-    "encoding/json"
-	"github.com/armon/go-metrics"
-    "sync"
 )
 
 const (
@@ -17,9 +18,11 @@ const (
 )
 
 var (
-	keyCurrentTerm  = []byte("CurrentTerm")
-	keyLastVoteTerm = []byte("LastVoteTerm")
-	keyLastVoteCand = []byte("LastVoteCand")
+	keyCurrentTerm         = []byte("CurrentTerm")
+	keyLastVoteTerm        = []byte("LastVoteTerm")
+	keyLastVoteCand        = []byte("LastVoteCand")
+	keyWitnessStateKeys    = []byte("WitnessStateKeys")
+	keyWitnessStateRecords = []byte("WitnessStateRecords")
 )
 
 // getRPCHeader returns an initialized RPCHeader struct for the given
@@ -76,12 +79,6 @@ type commitTuple struct {
 	future *logFuture
 }
 
-type clientSession struct {
-    lastContact         time.Time
-    heartbeatCh         chan bool
-    endSessionCommand   []byte
-}
-
 // leaderState is state that is used while we are a leader.
 type leaderState struct {
 	commitCh   chan struct{}
@@ -90,8 +87,14 @@ type leaderState struct {
 	replState  map[ServerID]*followerReplication
 	notify     map[*verifyFuture]struct{}
 	stepDown   chan struct{}
-    clientSessions  map[ServerAddress]*clientSession
-    clientSessionsLock  sync.RWMutex
+}
+
+// Tuple used to uniquely identify RPC using RIFL.
+type ClientSeqNo struct {
+	// Identifies unique client.
+	ClientID uint64
+	// Identifies unique RPC from a client.
+	SeqNo uint64
 }
 
 // setLeader is used to modify the current leader of the cluster
@@ -182,7 +185,7 @@ func (r *Raft) runFollower() {
 			b.respond(r.liveBootstrap(b.configuration))
 
 		case <-heartbeatTimer:
-            // Restart the heartbeat timer
+			// Restart the heartbeat timer
 			heartbeatTimer = randomTimeout(r.conf.HeartbeatTimeout)
 
 			// Check if we have had a successful contact
@@ -346,7 +349,6 @@ func (r *Raft) runLeader() {
 	r.leaderState.replState = make(map[ServerID]*followerReplication)
 	r.leaderState.notify = make(map[*verifyFuture]struct{})
 	r.leaderState.stepDown = make(chan struct{}, 1)
-    r.leaderState.clientSessions = make(map[ServerAddress]*clientSession)
 
 	// Cleanup state on step down
 	defer func() {
@@ -422,6 +424,9 @@ func (r *Raft) runLeader() {
 	}
 	r.dispatchLogs([]*logFuture{noop})
 
+	//TODO: make sure it's safe to replay from witnesses here (can't start having client requests)
+	r.recoverWithWitness()
+
 	// Sit in the leader loop until we step down
 	r.leaderLoop()
 }
@@ -472,6 +477,74 @@ func (r *Raft) startStopReplication() {
 	}
 }
 
+// Replay requests from a witness. Should only be called when a new leader
+// is elected. Witness is set to recovery mode and sends all saved client
+// requests, which are replayed by the new master.
+func (r *Raft) recoverWithWitness() {
+	// Construct request.
+    req := &RecoveryDataRequest{
+        RPCHeader:  r.getRPCHeader(),
+    }
+    resp := &RecoveryDataResponse{}
+    // when get it count, at teh end iterate over and if have >= ceil(f/2) + 1 counts then can commit
+    entryCounts := make(map[uint64]map[uint64]uint64, 0)
+    uniqueEntries := make(map[uint64]map[uint64]Log)
+    // Choose f+1 witnesses and send RecoveryDataRequest.
+    quorumSz := len(r.configurations.latest.Servers) / 2 + 1
+    chosenWitnesses := make([]Server, 0)
+    for _, witness := range r.configurations.latest.Servers {
+        if witness.ID == r.localID {
+            // Don't choose self to recover from.
+            continue
+        }
+        err := r.trans.RecoverData(witness.ID, witness.Address, req, resp)
+        if err == nil {
+            chosenWitnesses = append(chosenWitnesses, witness)
+            for _,entry := range resp.Entries {
+                if entryCounts[entry.ClientID] == nil {
+                    entryCounts[entry.ClientID] = make(map[uint64]uint64)
+                    uniqueEntries[entry.ClientID] = make(map[uint64]Log)
+                }
+                entryCounts[entry.ClientID][entry.SeqNo] += 1  // initialized to 0
+                uniqueEntries[entry.ClientID][entry.SeqNo] = entry
+            }
+        } else {
+            // Cannot recover from this witness.
+            r.logger.Printf("[ERR] Failed to recover from witness %v: %v", witness, err)
+        }
+        // Contacted a quorum. Can assume will always reach this state (otherwise couldn't elect leader).
+        if len(chosenWitnesses) == quorumSz {
+            break
+        }
+    }
+	// Execute operations that are stored at ceil(f/2) + 1 witnesses synchronously.
+    minMajoritySz := (quorumSz / 2) + 1
+    for clientID := range entryCounts {
+        for seqNo := range entryCounts[clientID] {
+            if entryCounts[clientID][seqNo] < uint64(minMajoritySz) {
+                continue
+            }
+            entry := uniqueEntries[clientID][seqNo]
+            var err error
+            // Can disregard return value.
+            r.applySynchronousCommand(&entry, &err)
+            if err != nil {
+                r.logger.Printf("[ERR] Error executing operation retrieved from witness")
+            }
+        }
+    }
+    for _,chosenWitness := range chosenWitnesses {
+        // Unfreeze all chosen f+1 witnesses.
+        unfreezeReq := &UnfreezeRequest{
+            RPCHeader: r.getRPCHeader(),
+        }
+        err := r.trans.UnfreezeWitness(chosenWitness.ID, chosenWitness.Address, unfreezeReq, &UnfreezeResponse{})
+        if err != nil {
+            r.logger.Printf("[ERR] Failed to unfreeze witness %v: %v", chosenWitness, err)
+        }
+    }
+}
+
 // configurationChangeChIfStable returns r.configurationChangeCh if it's safe
 // to process requests from it, or nil otherwise. This must only be called
 // from the main thread.
@@ -512,7 +585,7 @@ func (r *Raft) leaderLoop() {
 
 		case <-r.leaderState.commitCh:
 			// Process the newly committed entries
-            oldCommitIndex := r.getCommitIndex()
+			oldCommitIndex := r.getCommitIndex()
 			commitIndex := r.leaderState.commitment.getCommitIndex()
 			r.setCommitIndex(commitIndex)
 
@@ -755,7 +828,7 @@ func (r *Raft) restoreUserSnapshot(meta *SnapshotMeta, reader io.Reader) error {
 	// Dump the snapshot. Note that we use the latest configuration,
 	// not the one that came with the snapshot.
 	sink, err := r.snapshots.Create(version, lastIndex, term,
-		r.configurations.latest, r.configurations.latestIndex, r.trans)
+		r.configurations.latest, r.configurations.latestIndex, r.nextClientId, r.clientResponseCache, r.trans)
 	if err != nil {
 		return fmt.Errorf("failed to create snapshot: %v", err)
 	}
@@ -842,7 +915,7 @@ func (r *Raft) appendConfigurationEntry(future *configurationChangeFuture) {
 // dispatchLog is called on the leader to push a log to disk, mark it
 // as inflight and begin replication of it.
 func (r *Raft) dispatchLogs(applyLogs []*logFuture) {
-    now := time.Now()
+	now := time.Now()
 	defer metrics.MeasureSince([]string{"raft", "leader", "dispatchLog"}, now)
 
 	term := r.getCurrentTerm()
@@ -915,7 +988,7 @@ func (r *Raft) processLogs(index uint64, future *logFuture) {
 
 // processLog is invoked to process the application of a single committed log entry.
 func (r *Raft) processLog(l *Log, future *logFuture) {
-    switch l.Type {
+	switch l.Type {
 	case LogBarrier:
 		// Barrier is handled by the FSM
 		fallthrough
@@ -930,9 +1003,32 @@ func (r *Raft) processLog(l *Log, future *logFuture) {
 			}
 		}
 
+		// Garbage collect at witnesses.
+		clientSeqNo := ClientSeqNo{
+			ClientID: l.ClientID,
+			SeqNo:    l.SeqNo,
+		}
+		// TODO: also need to delete key
+		records, keys := stableGetWitnessState(r.stable)
+		delete(records, clientSeqNo)
+		for _, key := range l.Keys {
+			hash := getKeyHash(key)
+			if bytes.Compare(key, keys[hash]) == 0 {
+				delete(keys, hash)
+			}
+		}
+		stableSetWitnessState(r.stable, records, keys)
+
 		// Return so that the future is only responded to
 		// by the FSM handler when the application is done
 		return
+
+	case LogNextClientId:
+		var nextClientId uint64
+		if err := decodeMsgPack(l.Data, &nextClientId); err != nil {
+			panic(fmt.Errorf("failed to decode next cliend id: %v", err))
+		}
+		r.nextClientId = nextClientId
 
 	case LogConfiguration:
 	case LogAddPeerDeprecated:
@@ -950,6 +1046,60 @@ func (r *Raft) processLog(l *Log, future *logFuture) {
 	}
 }
 
+// Hashes a key to be used in a direct-mapped cache.
+// Params:
+//   - key: Key to get hash value of
+// Returns: hash of key
+func getKeyHash(key Key) uint32 {
+	hash := sha256.Sum256(key)
+	hashSlice := hash[:]
+	return binary.LittleEndian.Uint32(hashSlice)
+}
+
+// stableSetWitnessStorage writes the witnessState to stable storage.
+// Should only be called if r.witnessState.Lock is held. Panics if
+// failure.
+func stableSetWitnessState(stable StableStore, records map[ClientSeqNo]Log, keys map[uint32]Key) {
+	recordsBuf, err1 := encodeMsgPack(records)
+	if err1 != nil {
+		panic(fmt.Errorf("failed to encode witness state records: %v", err1))
+	}
+	err2 := stable.Set(keyWitnessStateRecords, recordsBuf.Bytes())
+	if err2 != nil {
+		panic(fmt.Errorf("failed to write witness state records to stable storage: %v", err2))
+	}
+	keysBuf, err3 := encodeMsgPack(keys)
+	if err3 != nil {
+		panic(fmt.Errorf("failed to encode witness state keys: %v", err3))
+	}
+	err4 := stable.Set(keyWitnessStateKeys, keysBuf.Bytes())
+	if err4 != nil {
+		panic(fmt.Errorf("failed to write witness state keys to stable storage: %v", err4))
+	}
+}
+
+func stableGetWitnessState(stable StableStore) (map[ClientSeqNo]Log, map[uint32]Key) {
+	recordsBuf, err1 := stable.Get(keyWitnessStateRecords)
+	if err1 != nil {
+		panic(fmt.Errorf("failed to read witness state records from stable storage: %v", err1))
+	}
+	records := make(map[ClientSeqNo]Log)
+	err2 := decodeMsgPack(recordsBuf, &records)
+	if err2 != nil {
+		panic(fmt.Errorf("failed to decode witness state records: %v", err2))
+	}
+	keysBuf, err3 := stable.Get(keyWitnessStateKeys)
+	if err3 != nil {
+		panic(fmt.Errorf("failed to read witness state keys from stable storage: %v", err3))
+	}
+	keys := make(map[uint32]Key)
+	err4 := decodeMsgPack(keysBuf, &keys)
+	if err4 != nil {
+		panic(fmt.Errorf("failed to decode witness state keys: %v", err4))
+	}
+	return records, keys
+}
+
 // processRPC is called to handle an incoming RPC request. This must only be
 // called from the main thread.
 func (r *Raft) processRPC(rpc RPC) {
@@ -958,16 +1108,26 @@ func (r *Raft) processRPC(rpc RPC) {
 		return
 	}
 
-    switch cmd := rpc.Command.(type) {
+	switch cmd := rpc.Command.(type) {
 	case *AppendEntriesRequest:
 		r.appendEntries(rpc, cmd)
 	case *RequestVoteRequest:
 		r.requestVote(rpc, cmd)
 	case *InstallSnapshotRequest:
 		r.installSnapshot(rpc, cmd)
-    case *ClientRequest:
-        r.clientRequest(rpc, cmd)
-    default:
+	case *RecordRequest:
+		r.recordRequest(rpc, cmd)
+	case *SyncRequest:
+		r.syncRequest(rpc, cmd)
+    case *RecoveryDataRequest:
+        r.recoveryDataRequest(rpc, cmd)
+    case *UnfreezeRequest:
+        r.unfreezeRequest(rpc, cmd)
+	case *ClientRequest:
+		r.clientRequest(rpc, cmd)
+	case *ClientIdRequest:
+		r.clientIdRequest(rpc, cmd)
+	default:
 		r.logger.Printf("[ERR] raft: Got unexpected command: %#v", rpc.Command)
 		rpc.Respond(nil, fmt.Errorf("unexpected command"))
 	}
@@ -1291,7 +1451,7 @@ func (r *Raft) installSnapshot(rpc RPC, req *InstallSnapshotRequest) {
 	}
 	version := getSnapshotVersion(r.protocolVersion)
 	sink, err := r.snapshots.Create(version, req.LastLogIndex, req.LastLogTerm,
-		reqConfiguration, reqConfigurationIndex, r.trans)
+		reqConfiguration, reqConfigurationIndex, r.nextClientId, r.clientResponseCache, r.trans)
 	if err != nil {
 		r.logger.Printf("[ERR] raft: Failed to create snapshot to install: %v", err)
 		rpcErr = fmt.Errorf("failed to create snapshot: %v", err)
@@ -1363,105 +1523,283 @@ func (r *Raft) installSnapshot(rpc RPC, req *InstallSnapshotRequest) {
 	return
 }
 
-// Handle a clientRequest RPC from client.
+// Handle a recoveryDataRequest from new leader to witness. Returns
+// all entries stored at witness and freezes witness until unfreeze
+// request is sent.
+// Params:
+//   - rpc: RPC object used to send a response.
+//   - req: Recovery DAta Request being handled.
+func (r *Raft) recoveryDataRequest(rpc RPC, req *RecoveryDataRequest) {
+    logMap,_ := stableGetWitnessState(r.stable)
+    logs := make([]Log, 0)
+    for _,log := range logMap {
+        logs = append(logs, log)
+    }
+    resp := &RecoveryDataResponse {
+        RPCHeader: r.getRPCHeader(),
+        Entries: logs,
+    }
+    r.frozenLock.Lock()
+    r.frozen = true
+    r.frozenLock.Unlock()
+    rpc.Respond(resp, nil)
+}
+
+// Handle a unfreezeRequest from new leader to witness. Sent after
+// recoveryDataRequest to allow witness to start receiving client
+// record requests again.
+func (r *Raft) unfreezeRequest(rpc RPC, req *UnfreezeRequest) {
+    r.frozenLock.Lock()
+    r.frozen = false
+    r.frozenLock.Unlock()
+    resp := &UnfreezeResponse {
+        RPCHeader: r.getRPCHeader(),
+
+    }
+    rpc.Respond(resp, nil)
+}
+
+// Handle a clientIdRequest from client. Can only be handled at
+// the leader. Assigns a new client ID and replicates the client
+// ID to followers.
+// Params:
+//   - rpc: RPC object used to send a response.
+//   - c: Client Id Request being handled.
+func (r *Raft) clientIdRequest(rpc RPC, c *ClientIdRequest) {
+	leader := r.Leader()
+	resp := &ClientIdResponse{
+		LeaderAddress: leader,
+	}
+	// Can only assign client IDs at the leader.
+	if r.getState() == Leader {
+		resp.ClientID = r.nextClientId
+		r.nextClientId += 1
+		r.clientResponseLock.Lock()
+		r.clientResponseCache[resp.ClientID] = make(map[uint64]clientResponseEntry)
+		r.clientResponseLock.Unlock()
+		r.logger.Printf("Client ID to send is %v", r.nextClientId)
+		go func(r *Raft, resp *ClientIdResponse, rpc RPC) {
+			f := r.SendNextClientId(0)
+			if f.Error() != nil {
+				r.logger.Printf("err :%v", f.Error())
+			}
+			rpc.Respond(resp, f.Error())
+		}(r, resp, rpc)
+	} else {
+		rpc.Respond(resp, ErrNotLeader)
+	}
+}
+
+// Handle a syncRequest from client. Can only be handled at the
+// leader, and required a valid client ID. Synchronously
+// executes the client command.
+// Params:
+//   - rpc: RPC object used to send a response
+//   - sync: Sync Request being handled.
+func (r *Raft) syncRequest(rpc RPC, sync *SyncRequest) {
+	leader := r.Leader()
+	r.logger.Printf("leader: ", leader)
+	resp := &SyncResponse{
+		Success:       false,
+		LeaderAddress: leader,
+	}
+	// Check if client ID is valid.
+	r.clientResponseLock.RLock()
+	_, ok := r.clientResponseCache[sync.Entry.ClientID]
+	r.clientResponseLock.RUnlock()
+	if !ok {
+		rpc.Respond(resp, ErrBadClientId)
+		return
+	}
+	// Check if request has already been made.
+	// Have we contacted the leader?
+	if r.getState() == Leader {
+		// Apply all commands in client request.
+		r.goFunc(func() {
+			var rpcErr error
+			resp.ResponseData = r.applySynchronousCommand(sync.Entry, &rpcErr)
+			resp.Success = true
+			rpc.Respond(resp, rpcErr)
+		})
+	} else {
+		resp.Success = false
+		rpc.Respond(resp, ErrNotLeader)
+	}
+}
+
+// Handle a recordRequest from client. Can only be handled
+// at a witness, not the leader. Records an operation successfully
+// if it is commutative with other stored operations.
+func (r *Raft) recordRequest(rpc RPC, record *RecordRequest) {
+	// Master can't act as a witness.
+	if r.getState() == Leader {
+		resp := &RecordResponse{
+			Success: false,
+		}
+		rpc.Respond(resp, ErrNotWitness)
+		return
+	}
+
+    // Can't accept record request if frozen.
+    r.frozenLock.RLock()
+    isFrozen := r.frozen
+    r.frozenLock.RUnlock()
+    if isFrozen {
+        resp := &RecordResponse {
+            Success: false,
+        }
+        rpc.Respond(resp, ErrWitnessFrozen)
+        return
+    }
+
+    // Can't accept record request if sending to stale set of witnesses.
+    if record.Term < r.getCurrentTerm() {
+        resp := &RecordResponse {
+            Success: false,
+        }
+        rpc.Respond(resp, ErrStaleTerm)
+        return
+    }
+
+	success := r.storeIfCommutative(record.Entry)
+	r.logger.Printf("witness says client req is commutative: %b", success)
+	// Respond to client.
+	resp := &RecordResponse{
+		Success: success,
+	}
+
+	if success {
+		rpc.Respond(resp, nil)
+	} else {
+		rpc.Respond(resp, ErrNotCommutative)
+	}
+}
+
+// Check if an operation is commutative with other operations
+// stored at the witness and if this is the case, store it and
+// return true, otherwise return false.
+// Params:
+//   - log: Log entry of type LogCommand to store.
+// Return true if successfully stored (must be commutative with
+// other operations, false otherwise.
+func (r *Raft) storeIfCommutative(log *Log) bool {
+	records, keys := stableGetWitnessState(r.stable)
+
+	// Check if operation involving key already stored at witness or no
+	// space to store in direct-associative cache.
+	for _, key := range log.Keys {
+		hash := getKeyHash(key)
+		if _, ok := keys[hash]; ok {
+			return false
+		}
+	}
+
+	// Add keys separately in case keys included multiple times by client.
+	for _, key := range log.Keys {
+		hash := getKeyHash(key)
+		keys[hash] = key
+	}
+	// Record RPC in witness.
+	clientSeqNo := ClientSeqNo{
+		ClientID: log.ClientID,
+		SeqNo:    log.SeqNo,
+	}
+	records[clientSeqNo] = *log
+
+	// Write updates to stable storage.
+	stableSetWitnessState(r.stable, records, keys)
+
+	return true
+}
+
+// Handle a clientRequest RPC from client. Can only be handled at
+// the leader. Requires a valid client ID. Only executes locally
+// and reports not synced if commutative, otherwise replicates
+// synchronously to followers and reports synced.
+// Params:
+//   - rpc: RPC object used to send a response.
+//   - c: Client Request object being handled.
 func (r *Raft) clientRequest(rpc RPC, c *ClientRequest) {
-    leader := r.Leader()
-    resp := &ClientResponse{
-        Success : false,
-        LeaderAddress : leader,
-    }
-    // Have we contacted the leader?
-    var rpcErr error
-    if (r.getState() == Leader) {
-        // Maintain sessions
-        if (c.KeepSession) {
-            r.leaderState.clientSessionsLock.RLock()
-            _, ok := r.leaderState.clientSessions[c.ClientAddr]
-            r.leaderState.clientSessionsLock.RUnlock()
-            // If first session, start heartbeat loop.
-            if c.EndSessionCommand != nil {
-                if !ok {
-                    r.leaderState.clientSessionsLock.Lock()
-                    r.leaderState.clientSessions[c.ClientAddr] = &clientSession{}
-                    r.leaderState.clientSessions[c.ClientAddr].heartbeatCh = make (chan bool, 1)
-                    r.leaderState.clientSessions[c.ClientAddr].endSessionCommand = c.EndSessionCommand
-                    r.leaderState.clientSessionsLock.Unlock()
-                    go r.clientSessionHeartbeatLoop(c.ClientAddr)
-                }
-                r.leaderState.clientSessionsLock.RLock()
-                ch := r.leaderState.clientSessions[c.ClientAddr].heartbeatCh
-                r.leaderState.clientSessionsLock.RUnlock()
-                ch <- true
-            }
-        }
-        // Apply all commands in client request.
-        go func(r *Raft, resp *ClientResponse, rpc RPC, c *ClientRequest) {
-            var rpcErr error
-            for _,entry := range(c.Entries) {
-                if (entry != nil) {
-                    r.applyCommand(entry.Data, resp, &rpcErr)
-                }
-            }
-            rpc.Respond(resp, rpcErr)
-        }(r, resp, rpc, c)
-    } else {
-        rpcErr = ErrNotLeader
-        resp.Success = false
-        rpc.Respond(resp, rpcErr)
-    }
+	leader := r.Leader()
+	resp := &ClientResponse{
+		Success:       false,
+		LeaderAddress: leader,
+	}
+	// Check if client ID is valid.
+	r.clientResponseLock.RLock()
+	_, ok := r.clientResponseCache[c.Entry.ClientID]
+	r.clientResponseLock.RUnlock()
+	if !ok {
+		rpc.Respond(resp, ErrBadClientId)
+		return
+	}
+	// Check if request has already been made.
+	// Have we contacted the leader?
+	if r.getState() == Leader {
+		// Apply all commands in client request.
+		r.goFunc(func() {
+			var rpcErr error
+			r.applyCommand(c.Entry, resp, &rpcErr)
+			rpc.Respond(resp, rpcErr)
+		})
+	} else {
+		resp.Success = false
+		rpc.Respond(resp, ErrNotLeader)
+	}
 }
 
-// Apply a command from leader to all raft FSMs. */
-func (r *Raft) applyCommand(command []byte, resp *ClientResponse, rpcErr *error) {
-    f := r.Apply(command, 0)
-    if f.Error() != nil {
-        r.logger.Printf("err: %v",f.Error())
-        *rpcErr = f.Error()
-        resp.Success = false
-    }
-    /* If callback, make leader execute callback */
-    var nextCommands [][]byte
-    callbacks := f.Callback()
-    for _,callback := range callbacks {
-        commands := callback()
-        for _, command := range commands {
-            nextCommands = append(nextCommands, command)
-        }
-    }
-    data, _:= json.Marshal(f.Response())
-    resp.ResponseData = data
-    resp.Success = true
-    for _,nextCommand := range nextCommands {
-        r.applyCommand(nextCommand, resp, rpcErr)
-    }
+// Apply a command locally if it is commutative (not synced) or
+// replicate to followers (synced). Sets fields in resp based on
+// execution of request and if synced.
+// Params:
+//   - log: Log entry to apply, type LogCommand.
+//   - resp: Response to populate after completing command.
+//   - rpcErr: Pointer to error to set if necessary.
+func (r *Raft) applyCommand(log *Log, resp *ClientResponse, rpcErr *error) {
+	commutative := r.storeIfCommutative(log)
+	if commutative {
+		// Apply locally, store in witness cache, and respond
+		resp.ResponseData = r.applyCommutativeCommand(log, rpcErr)
+		resp.Synced = false
+	} else {
+		// Sync all previous requests and execute this request synchronously.
+		resp.ResponseData = r.applySynchronousCommand(log, rpcErr)
+		resp.Synced = true
+	}
+	resp.LeaderAddress = r.Leader()
 }
 
-/* Manage a client session. */
-func (r *Raft) clientSessionHeartbeatLoop(clientAddr ServerAddress) {
-    r.leaderState.clientSessionsLock.RLock()
-    ch := r.leaderState.clientSessions[clientAddr].heartbeatCh
-    r.leaderState.clientSessionsLock.RUnlock()
-    for {
-        select {
-        case <- ch:
-            r.leaderState.clientSessionsLock.Lock()
-            r.leaderState.clientSessions[clientAddr].lastContact = time.Now()
-            r.leaderState.clientSessionsLock.Unlock()
-        case <- time.After(30*time.Second):
-            r.logger.Printf("ending client session")
-            var err error
-            r.leaderState.clientSessionsLock.RLock()
-            command := r.leaderState.clientSessions[clientAddr].endSessionCommand
-            r.leaderState.clientSessionsLock.RUnlock()
-            if command != nil {
-                r.applyCommand(command, &ClientResponse{}, &err)
-            }
-            r.leaderState.clientSessionsLock.Lock()
-            delete(r.leaderState.clientSessions, clientAddr)
-            r.leaderState.clientSessionsLock.Unlock()
-            return
-        }
-    }
+// Apply a command locally. Should only be called by the leader if
+// the leader has confirmed that the operation is commutative and
+// is stored in its set of current operations.
+// Params:
+//   - log: Log entry to apply commutatively, type LogCommand.
+//   - rpcErr: Pointer to error to set if necessary.
+// Returns: byte array containing response to applying command.
+func (r *Raft) applyCommutativeCommand(log *Log, rpcErr *error) []byte {
+	// Apply locally, store in witness cache, and respond
+	var response interface{}
+	r.applyCommandLocally(log, &response)
+	data, _ := json.Marshal(response)
+	// Replicate to client asynchronously
+	r.goFunc(func() { r.Apply(log, 0) })
+	return data
+}
+
+// Replicate a command to followers. Should be called if leader has
+// confirmed that an operation is not commutative.
+// Params:
+//   - log: Log entry to apply commutatively, type LogCommand.
+//   - rpcErr: Pointer to error to set if necessary.
+// Returns: byte array containing reponse to applying command.
+func (r *Raft) applySynchronousCommand(log *Log, rpcErr *error) []byte {
+	f := r.Apply(log, 0)
+	if f.Error() != nil {
+		r.logger.Printf("err: %v", f.Error())
+		*rpcErr = f.Error()
+	}
+	data, _ := json.Marshal(f.Response())
+	return data
 }
 
 // setLastContact is used to set the last contact time to now

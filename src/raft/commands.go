@@ -150,17 +150,131 @@ func (r *InstallSnapshotResponse) GetRPCHeader() RPCHeader {
 	return r.RPCHeader
 }
 
-type ClientRequest struct {
-    RPCHeader
+// Record RPCs are used to store commutative operations at witnesses.
+// Accepted if commutative with other operations at witness, rejected
+// otherwise.
+type RecordRequest struct {
+	RPCHeader
 
-    // New entries to commit. 
-    Entries[] *Log
-    // True if should initiate or maintain session, false otherwise.
-    KeepSession bool
-    // ID of client to contact raft server. 
-    ClientAddr ServerAddress
-    // Command to be executed when client session terminates.
-    EndSessionCommand []byte
+	// Entry to commit
+	Entry *Log
+    // Use term to make sure witness is valid.
+    Term uint64
+}
+
+// See WithRPCHeader.
+func (r *RecordRequest) GetRPCHeader() RPCHeader {
+	return r.RPCHeader
+}
+
+// Record RPCs are used to store commutative operations at witnesses.
+// Accepted if commutative with other operations at witness, rejected
+// otherwise.
+type RecordResponse struct {
+	RPCHeader
+
+	// True if operation recorded at witness, false otherwise.
+	Success bool
+    // Discover term if term not correct.
+    Term uint64
+}
+
+// See WithRPCHeader.
+func (r *RecordResponse) GetRPCHeader() RPCHeader {
+	return r.RPCHeader
+}
+
+// Issued by a client to the master when a client cannot record an
+// operation in all witnesses.
+type SyncRequest struct {
+	RPCHeader
+
+	Entry *Log
+}
+
+// See WithRPCHeader.
+func (r *SyncRequest) GetRPCHeader() RPCHeader {
+	return r.RPCHeader
+}
+
+// Interface used for all generic client requests so that client library
+// can find active leader.
+type GenericClientResponse interface {
+	GetLeaderAddress() ServerAddress
+}
+
+// Sent when the master has completed the sync in response to SyncRequest.
+type SyncResponse struct {
+	RPCHeader
+
+	// True if successfully synced at master.
+	Success       bool
+	LeaderAddress ServerAddress
+	ResponseData  []byte
+}
+
+// See WithRPCHeader.
+func (r *SyncResponse) GetRPCHeader() RPCHeader {
+	return r.RPCHeader
+}
+
+// See GenericClientResponse interface.
+func (r *SyncResponse) GetLeaderAddress() ServerAddress {
+	return r.LeaderAddress
+}
+
+// Sent from new leader to witness to set witness into recovery
+// mode (don't receive requests) and get all client requests stored
+// at witness.
+type RecoveryDataRequest struct {
+	RPCHeader
+}
+
+// See WithRPCHeader.
+func (r *RecoveryDataRequest) GetRPCHeader() RPCHeader {
+	return r.RPCHeader
+}
+
+// Contains all client requests stored at witness, sent from witness
+// to new leader.
+type RecoveryDataResponse struct {
+	RPCHeader
+
+	// All client requests stored at witness.
+	Entries []Log
+}
+
+// See WithRPCHeader.
+func (r *RecoveryDataResponse) GetRPCHeader() RPCHeader {
+	return r.RPCHeader
+}
+
+// Unfreeze witness to allow it to process record requests again.
+type UnfreezeRequest struct {
+    RPCHeader
+}
+
+// See WithRPCHeader.
+func (r *UnfreezeRequest) GetRPCHeader() RPCHeader {
+    return r.RPCHeader
+}
+
+// Response to UnfreezeRequest (see UnfreezeRequest).
+type UnfreezeResponse struct {
+    RPCHeader
+}
+
+// Ssee WithRPCHeader.
+func (r *UnfreezeResponse) GetRPCHeader() RPCHeader {
+    return r.RPCHeader
+}
+
+// Sent by the client to apply a command at a raft cluster.
+type ClientRequest struct {
+	RPCHeader
+
+	// New entry to commit.
+	Entry *Log
 }
 
 // See WithRPCHeader.
@@ -168,15 +282,58 @@ func (r *ClientRequest) GetRPCHeader() RPCHeader {
 	return r.RPCHeader
 }
 
+// Contains the result of applying a command, sent in response to ClientRequest.
 type ClientResponse struct {
-    RPCHeader
+	RPCHeader
 
-    Success bool
-    LeaderAddress ServerAddress
-    ResponseData  []byte 
+	// True if command successfully executed.
+	Success bool
+	// Address of current leader. Used to redirect from follower to leader.
+	LeaderAddress ServerAddress
+	// Response from applying command.
+	ResponseData []byte
+	// True if leader synced (not commutative), false otherwise.
+	Synced bool
 }
 
 // See WithRPCHeader.
 func (r *ClientResponse) GetRPCHeader() RPCHeader {
 	return r.RPCHeader
+}
+
+// See GenericClientResponse interface.
+func (r *ClientResponse) GetLeaderAddress() ServerAddress {
+	return r.LeaderAddress
+}
+
+// Requests an ID for a client. Clients must have an ID allocated by
+// the leader to make requests.
+type ClientIdRequest struct {
+	RPCHeader
+}
+
+// See WithRPCHeader.
+func (r *ClientIdRequest) GetRPCHeader() RPCHeader {
+	return r.RPCHeader
+}
+
+// Returns an ID allocated by the leader, sent in response to ClientIdRequest.
+type ClientIdResponse struct {
+	RPCHeader
+
+	// ID of client assigned by cluster.
+	ClientID uint64
+
+	// Address of active leader. Used as a hint to find active leader.
+	LeaderAddress ServerAddress
+}
+
+// See WithRPCHeader.
+func (r *ClientIdResponse) GetRPCHeader() RPCHeader {
+	return r.RPCHeader
+}
+
+// See GenericClientResponse.
+func (r *ClientIdResponse) GetLeaderAddress() ServerAddress {
+	return r.LeaderAddress
 }

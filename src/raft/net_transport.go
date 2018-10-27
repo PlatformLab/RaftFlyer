@@ -18,8 +18,18 @@ const (
 	rpcAppendEntries uint8 = iota
 	rpcRequestVote
 	rpcInstallSnapshot
+	rpcRecoverDataRequest
+    rpcRecoverDataResponse
+    rpcUnfreezeRequest
+    rpcUnfreezeResponse
     rpcClientRequest
-    rpcClientResponse
+	rpcClientResponse
+	rpcClientIdRequest
+	rpcClientIdResponse
+	rpcRecordRequest
+	rpcRecordResponse
+	rpcSyncRequest
+	rpcSyncResponse
 
 	// DefaultTimeoutScale is the default TimeoutScale in a NetworkTransport.
 	DefaultTimeoutScale = 256 * 1024 // 256KB
@@ -254,7 +264,7 @@ func (n *NetworkTransport) getPooledConn(target ServerAddress) *netConn {
 // getConnFromAddressProvider returns a connection from the server address provider if available, or defaults to a connection using the target server address
 func (n *NetworkTransport) getConnFromAddressProvider(id ServerID, target ServerAddress) (*netConn, error) {
 	address := n.getProviderAddressOrFallback(id, target)
-    return n.getConn(address)
+	return n.getConn(address)
 }
 
 func (n *NetworkTransport) getProviderAddressOrFallback(id ServerID, target ServerAddress) ServerAddress {
@@ -336,6 +346,16 @@ func (n *NetworkTransport) RequestVote(id ServerID, target ServerAddress, args *
 	return n.genericRPC(id, target, rpcRequestVote, args, resp)
 }
 
+// RecoverData implements the Transport interface.
+func (n *NetworkTransport) RecoverData(id ServerID, target ServerAddress, args *RecoveryDataRequest, resp *RecoveryDataResponse) error {
+    return n.genericRPC(id, target, rpcRecoverDataRequest, args, resp)
+}
+
+// UnfreezeWitness implements the Transport interface.
+func (n *NetworkTransport) UnfreezeWitness(id ServerID, target ServerAddress, args *UnfreezeRequest, resp *UnfreezeResponse) error {
+    return n.genericRPC(id, target, rpcUnfreezeRequest, args, resp)
+}
+
 // genericRPC handles a simple request/response RPC.
 func (n *NetworkTransport) genericRPC(id ServerID, target ServerAddress, rpcType uint8, args interface{}, resp interface{}) error {
 	// Get a conn
@@ -414,11 +434,11 @@ func (n *NetworkTransport) DecodePeer(buf []byte) ServerAddress {
 // listen is used to handling incoming connections.
 func (n *NetworkTransport) listen() {
 	for {
-        // Accept incoming connections
+		// Accept incoming connections
 		conn, err := n.stream.Accept()
-        if err != nil {
+		if err != nil {
 			if n.IsShutdown() {
-                n.logger.Printf("Shutting down")
+				n.logger.Printf("Shutting down")
 				return
 			}
 			n.logger.Printf("[ERR] raft-net: Failed to accept connection: %v", err)
@@ -455,7 +475,7 @@ func (n *NetworkTransport) handleConn(conn net.Conn) {
 
 // handleCommand is used to decode and dispatch a single command.
 func (n *NetworkTransport) handleCommand(r *bufio.Reader, dec *codec.Decoder, enc *codec.Encoder) error {
-    // Get the rpc type
+	// Get the rpc type
 	rpcType, err := r.ReadByte()
 	if err != nil {
 		return err
@@ -499,12 +519,40 @@ func (n *NetworkTransport) handleCommand(r *bufio.Reader, dec *codec.Decoder, en
 		rpc.Command = &req
 		rpc.Reader = io.LimitReader(r, req.Size)
 
-    case rpcClientRequest:
-        var req ClientRequest
+	case rpcSyncRequest:
+		var req SyncRequest
+		if err := dec.Decode(&req); err != nil {
+			return err
+		}
+		rpc.Command = &req
+
+	case rpcRecordRequest:
+		var req RecordRequest
+		if err := dec.Decode(&req); err != nil {
+			return err
+		}
+		rpc.Command = &req
+
+    case rpcRecoverDataRequest:
+        var req RecoveryDataRequest
         if err := dec.Decode(&req); err != nil {
             return err
         }
         rpc.Command = &req
+
+	case rpcClientRequest:
+		var req ClientRequest
+		if err := dec.Decode(&req); err != nil {
+			return err
+		}
+		rpc.Command = &req
+
+	case rpcClientIdRequest:
+		var req ClientIdRequest
+		if err := dec.Decode(&req); err != nil {
+			return err
+		}
+		rpc.Command = &req
 
 	default:
 		return fmt.Errorf("unknown rpc type %d", rpcType)
@@ -512,7 +560,7 @@ func (n *NetworkTransport) handleCommand(r *bufio.Reader, dec *codec.Decoder, en
 
 	// Check for heartbeat fast-path
 	if isHeartbeat {
-        n.heartbeatFnLock.Lock()
+		n.heartbeatFnLock.Lock()
 		fn := n.heartbeatFn
 		n.heartbeatFnLock.Unlock()
 		if fn != nil {
@@ -578,7 +626,7 @@ func decodeResponse(conn *netConn, resp interface{}) (bool, error) {
 func sendRPC(conn *netConn, rpcType uint8, args interface{}) error {
 	// Write the request type
 	if err := conn.w.WriteByte(rpcType); err != nil {
-        conn.Release()
+		conn.Release()
 		return err
 	}
 
@@ -589,8 +637,8 @@ func sendRPC(conn *netConn, rpcType uint8, args interface{}) error {
 	}
 
 	// Flush
-    if err := conn.w.Flush(); err != nil {
-        conn.Release()
+	if err := conn.w.Flush(); err != nil {
+		conn.Release()
 		return err
 	}
 	return nil
